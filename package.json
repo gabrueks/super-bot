@@ -1,0 +1,25 @@
+{
+  "name": "super-bot",
+  "version": "1.0.0",
+  "description": "Autonomous crypto trading bot powered by Claude AI",
+  "main": "src/index.ts",
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "latest",
+    "binance-api-node": "latest",
+    "dotenv": "latest",
+    "node-cron": "latest",
+    "technicalindicators": "latest"
+  },
+  "devDependencies": {
+    "@types/node": "latest",
+    "@types/node-cron": "latest",
+    "tsx": "latest",
+    "typescript": "latest"
+  }
+}

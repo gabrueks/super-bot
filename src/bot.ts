@@ -1,7 +1,8 @@
 import { botConfig } from './config';
 import { MarketData, CycleResult, TradeRecord } from './types';
-import { fetchTicker, fetchOrderBook, fetchCurrentPrice } from './services/binance.service';
+import { placeMarketSellByQty } from './services/binance.service';
 import { analyzeSymbol } from './services/analysis.service';
+import { getCachedTicker, getCachedBookTicker } from './services/market-cache.service';
 import {
   buildPortfolioState,
   getRecentTrades,
@@ -13,10 +14,19 @@ import { getTradeDecisions } from './services/claude.service';
 import { executeDecisions } from './services/trading.service';
 import { fetchFearAndGreed } from './services/sentiment.service';
 import { checkTrailingStops, removeStop } from './services/stop-loss.service';
-import { placeMarketSellByQty } from './services/binance.service';
 import { log, logError } from './logger';
 
 let running = false;
+
+function buildPriceMap(marketData: MarketData[]): Record<string, number> {
+  const prices: Record<string, number> = {};
+  for (const md of marketData) {
+    if (md.ticker.price > 0) {
+      prices[md.symbol] = md.ticker.price;
+    }
+  }
+  return prices;
+}
 
 export async function runCycle(): Promise<CycleResult | null> {
   if (running) {
@@ -30,15 +40,17 @@ export async function runCycle(): Promise<CycleResult | null> {
 
   try {
     const [marketData, sentiment] = await Promise.all([
-      gatherMarketData(),
+      Promise.resolve(gatherMarketData()),
       fetchFearAndGreed(),
     ]);
     log('CYCLE', `Market data gathered for ${marketData.length} pairs (${Date.now() - cycleStart}ms)`);
 
-    await processTrailingStops(marketData);
+    const priceMap = buildPriceMap(marketData);
+
+    await processTrailingStops(priceMap);
 
     log('CYCLE', 'Building portfolio state...');
-    const portfolio = await buildPortfolioState();
+    const portfolio = await buildPortfolioState(priceMap);
     log('CYCLE', `Portfolio: $${portfolio.availableUsdt.toFixed(2)} USDT available, $${portfolio.totalValue.toFixed(2)} total, ${portfolio.positions.length} positions`);
 
     if (getDailyStartValue() === null) {
@@ -96,22 +108,18 @@ const STEP_SIZES: Record<string, number> = {
   ADAUSDT: 0.1,
 };
 
-async function processTrailingStops(marketData: MarketData[]): Promise<void> {
-  const currentPrices: Record<string, number> = {};
-  for (const md of marketData) {
-    if (md.ticker.price > 0) {
-      currentPrices[md.symbol] = md.ticker.price;
-    }
-  }
-
-  const triggered = checkTrailingStops(currentPrices);
+async function processTrailingStops(
+  priceMap: Record<string, number>,
+): Promise<void> {
+  const triggered = checkTrailingStops(priceMap);
   if (triggered.length === 0) return;
 
   log('CYCLE', `${triggered.length} trailing stop(s) triggered -- auto-selling`);
 
+  const portfolio = await buildPortfolioState(priceMap);
+
   for (const stop of triggered) {
     try {
-      const portfolio = await buildPortfolioState();
       const position = portfolio.positions.find((p) => p.symbol === stop.symbol);
       if (!position || position.quantity <= 0) {
         removeStop(stop.symbol);
@@ -145,49 +153,35 @@ async function processTrailingStops(marketData: MarketData[]): Promise<void> {
   }
 }
 
-async function gatherMarketData(): Promise<MarketData[]> {
+function gatherMarketData(): MarketData[] {
   const results: MarketData[] = [];
 
   for (const symbol of botConfig.tradingPairs) {
-    const start = Date.now();
-    log('MARKET', `Fetching ${symbol}...`);
-    try {
-      const [ticker, orderBook, technicalAnalysis] = await Promise.all([
-        fetchTicker(symbol),
-        fetchOrderBook(symbol),
-        analyzeSymbol(symbol),
-      ]);
+    log('MARKET', `Reading cached data for ${symbol}...`);
 
-      results.push({ symbol, ticker, orderBook, technicalAnalysis });
-      log('MARKET', `${symbol} done: $${ticker.price.toFixed(2)} (${ticker.priceChangePercent.toFixed(2)}%) [${Date.now() - start}ms]`);
-    } catch (err) {
-      logError('MARKET', `Failed to fetch ${symbol}`, err);
-      results.push({
-        symbol,
-        ticker: {
-          symbol,
-          price: 0,
-          priceChangePercent: 0,
-          highPrice: 0,
-          lowPrice: 0,
-          volume: 0,
-          quoteVolume: 0,
-        },
-        orderBook: {
-          symbol,
-          bidAskRatio: 1,
-          topBidPrice: 0,
-          topAskPrice: 0,
-          bidDepth: 0,
-          askDepth: 0,
-        },
-        technicalAnalysis: {
-          symbol,
-          currentPrice: 0,
-          timeframes: [],
-        },
-      });
-    }
+    const ticker = getCachedTicker(symbol) ?? {
+      symbol,
+      price: 0,
+      priceChangePercent: 0,
+      highPrice: 0,
+      lowPrice: 0,
+      volume: 0,
+      quoteVolume: 0,
+    };
+
+    const orderBook = getCachedBookTicker(symbol) ?? {
+      symbol,
+      bidAskRatio: 1,
+      topBidPrice: 0,
+      topAskPrice: 0,
+      bidDepth: 0,
+      askDepth: 0,
+    };
+
+    const technicalAnalysis = analyzeSymbol(symbol);
+
+    results.push({ symbol, ticker, orderBook, technicalAnalysis });
+    log('MARKET', `${symbol}: $${ticker.price.toFixed(2)} (${ticker.priceChangePercent.toFixed(2)}%)`);
   }
 
   return results;

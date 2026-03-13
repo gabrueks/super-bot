@@ -1,14 +1,12 @@
 import fs from 'fs';
-import path from 'path';
 import { PortfolioState, Position, TradeRecord } from '../types';
 import {
   DATA_DIR,
-  PORTFOLIO_STATE_FILE,
   TRADE_HISTORY_FILE,
   DAILY_SNAPSHOT_FILE,
   botConfig,
 } from '../config';
-import { fetchAccountBalances, fetchCurrentPrice } from './binance.service';
+import { fetchAccountBalances } from './binance.service';
 import { log, logError } from '../logger';
 
 function ensureDataDir(): void {
@@ -81,7 +79,9 @@ export function getDailyStartValue(): number | null {
   return todaySnap?.totalValue ?? null;
 }
 
-export async function buildPortfolioState(): Promise<PortfolioState> {
+export async function buildPortfolioState(
+  knownPrices?: Record<string, number>,
+): Promise<PortfolioState> {
   log('PORTFOLIO', 'Fetching account balances from Binance...');
   const balances = await fetchAccountBalances();
   const usdtBalance = balances.find((b) => b.asset === 'USDT');
@@ -102,12 +102,9 @@ export async function buildPortfolioState(): Promise<PortfolioState> {
     if (totalQty <= 0) continue;
 
     const symbol = `${balance.asset}USDT`;
-    let currentPrice: number;
-    try {
-      log('PORTFOLIO', `Fetching price for ${symbol}...`);
-      currentPrice = await fetchCurrentPrice(symbol);
-    } catch (err) {
-      logError('PORTFOLIO', `Failed to fetch price for ${symbol}, skipping`, err);
+    const currentPrice = knownPrices?.[symbol];
+    if (!currentPrice || currentPrice <= 0) {
+      log('PORTFOLIO', `No price available for ${symbol}, skipping`);
       continue;
     }
 

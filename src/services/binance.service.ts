@@ -1,12 +1,11 @@
-import Binance, { BinanceRest, CandleChartResult, OrderSide } from 'binance-api-node';
+import Binance, { BinanceRest, OrderSide } from 'binance-api-node';
 import { envConfig } from '../config';
-import { Kline, TickerStats, OrderBookSnapshot, TradeSide } from '../types';
-import { Timeframe } from '../config';
+import { TradeSide } from '../types';
 import { log } from '../logger';
 
 let client: BinanceRest;
 
-function getClient(): BinanceRest {
+export function getClient(): BinanceRest {
   if (!client) {
     log('BINANCE', 'Initializing Binance client');
     client = Binance({
@@ -15,78 +14,6 @@ function getClient(): BinanceRest {
     });
   }
   return client;
-}
-
-function mapCandle(c: CandleChartResult): Kline {
-  return {
-    openTime: c.openTime,
-    open: parseFloat(c.open),
-    high: parseFloat(c.high),
-    low: parseFloat(c.low),
-    close: parseFloat(c.close),
-    volume: parseFloat(c.volume),
-    closeTime: c.closeTime,
-  };
-}
-
-export async function fetchKlines(
-  symbol: string,
-  interval: Timeframe,
-  limit = 100,
-): Promise<Kline[]> {
-  log('BINANCE', `Fetching klines ${symbol} ${interval} (limit=${limit})`);
-  const raw = await getClient().candles({ symbol, interval, limit });
-  log('BINANCE', `Got ${raw.length} candles for ${symbol} ${interval}`);
-  return raw.map(mapCandle);
-}
-
-export async function fetchTicker(symbol: string): Promise<TickerStats> {
-  log('BINANCE', `Fetching 24h ticker ${symbol}`);
-  const raw: any = await getClient().dailyStats({ symbol });
-  return {
-    symbol,
-    price: parseFloat(raw.lastPrice ?? raw.curDayClose ?? '0'),
-    priceChangePercent: parseFloat(raw.priceChangePercent ?? '0'),
-    highPrice: parseFloat(raw.highPrice ?? raw.high ?? '0'),
-    lowPrice: parseFloat(raw.lowPrice ?? raw.low ?? '0'),
-    volume: parseFloat(raw.volume ?? '0'),
-    quoteVolume: parseFloat(raw.quoteVolume ?? raw.volumeQuote ?? '0'),
-  };
-}
-
-export async function fetchOrderBook(
-  symbol: string,
-  limit = 20,
-): Promise<OrderBookSnapshot> {
-  log('BINANCE', `Fetching order book ${symbol}`);
-  const book = await getClient().book({ symbol, limit });
-
-  const bids: any[] = book.bids ?? [];
-  const asks: any[] = book.asks ?? [];
-
-  const extractQty = (entry: any): number => {
-    if (Array.isArray(entry)) return parseFloat(entry[1] ?? '0');
-    if (entry && typeof entry === 'object') return parseFloat(entry.quantity ?? entry.qty ?? '0');
-    return 0;
-  };
-
-  const extractPrice = (entry: any): number => {
-    if (Array.isArray(entry)) return parseFloat(entry[0] ?? '0');
-    if (entry && typeof entry === 'object') return parseFloat(entry.price ?? '0');
-    return 0;
-  };
-
-  const bidDepth = bids.slice(0, 10).reduce((sum, e) => sum + extractQty(e), 0);
-  const askDepth = asks.slice(0, 10).reduce((sum, e) => sum + extractQty(e), 0);
-
-  return {
-    symbol,
-    bidAskRatio: askDepth > 0 ? bidDepth / askDepth : 1,
-    topBidPrice: bids.length > 0 ? extractPrice(bids[0]) : 0,
-    topAskPrice: asks.length > 0 ? extractPrice(asks[0]) : 0,
-    bidDepth,
-    askDepth,
-  };
 }
 
 export interface AccountBalance {
@@ -183,11 +110,3 @@ export async function placeMarketSellByQty(
   };
 }
 
-export async function fetchCurrentPrice(symbol: string): Promise<number> {
-  const priceMap: Record<string, string> = await (getClient() as any).prices({ symbol });
-  const price = priceMap[symbol];
-  if (!price) {
-    throw new Error(`No price returned for ${symbol}`);
-  }
-  return parseFloat(price);
-}

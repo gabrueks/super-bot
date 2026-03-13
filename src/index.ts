@@ -1,6 +1,8 @@
 import cron from 'node-cron';
 import { botConfig } from './config';
 import { runCycle } from './bot';
+import { initMarketStreams, shutdownMarketStreams } from './services/market-cache.service';
+import { log } from './logger';
 
 function printBanner(): void {
   const lines = [
@@ -9,6 +11,7 @@ function printBanner(): void {
     `  Pairs: ${botConfig.tradingPairs.join(', ')}`,
     `  Schedule: ${botConfig.cronInterval}`,
     `  Model: ${botConfig.claudeModel}`,
+    `  Data: WebSocket streams (real-time)`,
     `  Risk: max ${(botConfig.riskParams.maxAllocationPerCoin * 100).toFixed(0)}%/coin, ${(botConfig.riskParams.maxTotalDeployment * 100).toFixed(0)}% total, ${(botConfig.riskParams.maxDailyLossPercent * 100).toFixed(0)}% daily loss limit`,
     '',
     '  Starting...',
@@ -20,7 +23,12 @@ function printBanner(): void {
 async function main(): Promise<void> {
   printBanner();
 
-  process.stdout.write('Running initial cycle...\n');
+  log('INIT', 'Connecting WebSocket market data streams...');
+  await initMarketStreams();
+  log('INIT', 'WebSocket streams ready, waiting 3s for initial ticker data...');
+  await new Promise((r) => setTimeout(r, 3000));
+
+  log('INIT', 'Running initial cycle...');
   await runCycle();
 
   const task = cron.schedule(botConfig.cronInterval, async () => {
@@ -28,8 +36,10 @@ async function main(): Promise<void> {
   });
 
   const shutdown = (): void => {
-    process.stdout.write('\nShutting down...\n');
+    log('SHUTDOWN', 'Closing WebSocket connections...');
+    shutdownMarketStreams();
     task.stop();
+    log('SHUTDOWN', 'Done.');
     process.exit(0);
   };
 

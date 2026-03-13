@@ -1,7 +1,7 @@
 import { RSI, MACD, EMA, BollingerBands, ATR } from 'technicalindicators';
 import { Kline, TimeframeIndicators, TechnicalAnalysis } from '../types';
 import { Timeframe, TIMEFRAMES } from '../config';
-import { fetchKlines, fetchCurrentPrice } from './binance.service';
+import { getCachedKlines } from './market-cache.service';
 import { log } from '../logger';
 
 function computeIndicators(
@@ -74,23 +74,20 @@ function computeIndicators(
   };
 }
 
-export async function analyzeSymbol(
-  symbol: string,
-): Promise<TechnicalAnalysis> {
+export function analyzeSymbol(symbol: string): TechnicalAnalysis {
   log('ANALYSIS', `Computing indicators for ${symbol} on ${TIMEFRAMES.join(', ')}...`);
 
-  const klinesByTimeframe = await Promise.all(
-    TIMEFRAMES.map(async (tf: Timeframe) => ({
-      timeframe: tf,
-      klines: await fetchKlines(symbol, tf, 100),
-    })),
-  );
+  const klinesByTimeframe = TIMEFRAMES.map((tf: Timeframe) => ({
+    timeframe: tf,
+    klines: getCachedKlines(symbol, tf),
+  }));
 
   const timeframes = klinesByTimeframe.map(({ timeframe, klines }) =>
     computeIndicators(klines, timeframe),
   );
 
-  const currentPrice = await fetchCurrentPrice(symbol);
+  const shortKlines = klinesByTimeframe.find((k) => k.timeframe === '15m')?.klines;
+  const currentPrice = shortKlines?.[shortKlines.length - 1]?.close ?? 0;
 
   log('ANALYSIS', `${symbol} indicators done: RSI(1h)=${timeframes.find(t => t.timeframe === '1h')?.rsi.toFixed(1) ?? '?'}, price=$${currentPrice.toFixed(2)}`);
 

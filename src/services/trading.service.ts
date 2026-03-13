@@ -11,6 +11,7 @@ import {
   placeMarketSellByQty,
 } from './binance.service';
 import { appendTrade } from './portfolio.service';
+import { registerStop, removeStop } from './stop-loss.service';
 import { log, logError } from '../logger';
 
 function generateTradeId(): string {
@@ -59,6 +60,13 @@ export async function executeDecisions(
         result.tradesExecuted++;
         result.trades.push(trade);
         appendTrade(trade);
+
+        if (trade.side === 'BUY') {
+          registerStop(trade.symbol, trade.price);
+        } else if (trade.side === 'SELL') {
+          removeStop(trade.symbol);
+        }
+
         log('TRADING', `EXECUTED: ${trade.side} ${trade.symbol} qty=${trade.quantity.toFixed(6)} @ $${trade.price.toFixed(2)} = $${trade.total.toFixed(2)}`);
       }
     } catch (err) {

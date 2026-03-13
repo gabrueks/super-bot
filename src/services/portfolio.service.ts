@@ -120,6 +120,13 @@ export async function buildPortfolioState(): Promise<PortfolioState> {
       ? ((currentPrice - costBasis) / costBasis) * 100
       : 0;
 
+    totalValue += positionValue;
+
+    if (positionValue < botConfig.riskParams.minTradeUsdt) {
+      log('PORTFOLIO', `Dust skipped: ${symbol} qty=${totalQty.toFixed(6)} @ $${currentPrice.toFixed(2)} = $${positionValue.toFixed(2)}`);
+      continue;
+    }
+
     positions.push({
       symbol,
       quantity: totalQty,
@@ -129,7 +136,6 @@ export async function buildPortfolioState(): Promise<PortfolioState> {
       unrealizedPnlPercent,
     });
 
-    totalValue += positionValue;
     log('PORTFOLIO', `Position: ${symbol} qty=${totalQty.toFixed(6)} @ $${currentPrice.toFixed(2)} = $${positionValue.toFixed(2)}`);
   }
 

@@ -1,15 +1,19 @@
 import { botConfig } from './config';
-import { MarketData, CycleResult } from './types';
-import { fetchTicker, fetchOrderBook } from './services/binance.service';
+import { MarketData, CycleResult, TradeRecord } from './types';
+import { fetchTicker, fetchOrderBook, fetchCurrentPrice } from './services/binance.service';
 import { analyzeSymbol } from './services/analysis.service';
 import {
   buildPortfolioState,
   getRecentTrades,
   saveDailySnapshot,
   getDailyStartValue,
+  appendTrade,
 } from './services/portfolio.service';
 import { getTradeDecisions } from './services/claude.service';
 import { executeDecisions } from './services/trading.service';
+import { fetchFearAndGreed } from './services/sentiment.service';
+import { checkTrailingStops, removeStop } from './services/stop-loss.service';
+import { placeMarketSellByQty } from './services/binance.service';
 import { log, logError } from './logger';
 
 let running = false;
@@ -25,9 +29,13 @@ export async function runCycle(): Promise<CycleResult | null> {
   log('CYCLE', '=== Starting new cycle ===');
 
   try {
-    log('CYCLE', 'Gathering market data...');
-    const marketData = await gatherMarketData();
+    const [marketData, sentiment] = await Promise.all([
+      gatherMarketData(),
+      fetchFearAndGreed(),
+    ]);
     log('CYCLE', `Market data gathered for ${marketData.length} pairs (${Date.now() - cycleStart}ms)`);
+
+    await processTrailingStops(marketData);
 
     log('CYCLE', 'Building portfolio state...');
     const portfolio = await buildPortfolioState();
@@ -47,6 +55,7 @@ export async function runCycle(): Promise<CycleResult | null> {
       marketData,
       portfolio,
       recentTrades,
+      sentiment,
     );
     log('CYCLE', `Claude responded in ${Date.now() - claudeStart}ms with ${claudeResponse.decisions.length} decisions`);
 
@@ -75,6 +84,64 @@ export async function runCycle(): Promise<CycleResult | null> {
     };
   } finally {
     running = false;
+  }
+}
+
+const STEP_SIZES: Record<string, number> = {
+  BTCUSDT: 0.00001,
+  ETHUSDT: 0.0001,
+  BNBUSDT: 0.001,
+  SOLUSDT: 0.01,
+  XRPUSDT: 0.1,
+  ADAUSDT: 0.1,
+};
+
+async function processTrailingStops(marketData: MarketData[]): Promise<void> {
+  const currentPrices: Record<string, number> = {};
+  for (const md of marketData) {
+    if (md.ticker.price > 0) {
+      currentPrices[md.symbol] = md.ticker.price;
+    }
+  }
+
+  const triggered = checkTrailingStops(currentPrices);
+  if (triggered.length === 0) return;
+
+  log('CYCLE', `${triggered.length} trailing stop(s) triggered -- auto-selling`);
+
+  for (const stop of triggered) {
+    try {
+      const portfolio = await buildPortfolioState();
+      const position = portfolio.positions.find((p) => p.symbol === stop.symbol);
+      if (!position || position.quantity <= 0) {
+        removeStop(stop.symbol);
+        continue;
+      }
+
+      const stepSize = STEP_SIZES[stop.symbol] ?? 0.001;
+      const orderResult = await placeMarketSellByQty(
+        stop.symbol,
+        position.quantity,
+        stepSize,
+      );
+
+      const trade: TradeRecord = {
+        id: `${Date.now()}-stop-${Math.random().toString(36).slice(2, 8)}`,
+        symbol: stop.symbol,
+        side: 'SELL',
+        quantity: orderResult.executedQty,
+        price: orderResult.avgPrice,
+        total: orderResult.cummulativeQuoteQty,
+        timestamp: Date.now(),
+        reasoning: `Trailing stop triggered: price $${stop.currentPrice.toFixed(2)} dropped ${stop.dropPercent.toFixed(1)}% from peak $${stop.peakPrice.toFixed(2)}`,
+      };
+
+      appendTrade(trade);
+      removeStop(stop.symbol);
+      log('CYCLE', `STOP-LOSS SELL ${stop.symbol}: qty=${trade.quantity.toFixed(6)} @ $${trade.price.toFixed(2)} = $${trade.total.toFixed(2)}`);
+    } catch (err) {
+      logError('CYCLE', `Failed to execute trailing stop sell for ${stop.symbol}`, err);
+    }
   }
 }
 

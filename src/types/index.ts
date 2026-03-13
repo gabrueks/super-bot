@@ -131,4 +131,18 @@ export interface RiskParams {
   minTradeUsdt: number;
   cooldownMinutes: number;
   maxDailyLossPercent: number;
+  trailingStopPercent: number;
+}
+
+export interface SentimentData {
+  value: number;
+  label: string;
+  timestamp: number;
+}
+
+export interface TrailingStop {
+  symbol: string;
+  entryPrice: number;
+  peakPrice: number;
+  activatedAt: number;
 }

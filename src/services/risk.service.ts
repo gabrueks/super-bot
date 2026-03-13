@@ -109,6 +109,14 @@ function validateSell(
     };
   }
 
+  const positionValue = position.quantity * position.currentPrice;
+  if (positionValue < botConfig.riskParams.minTradeUsdt) {
+    return {
+      approved: false,
+      reason: `Position too small to sell: $${positionValue.toFixed(2)} < min $${botConfig.riskParams.minTradeUsdt} (dust)`,
+    };
+  }
+
   return { approved: true };
 }
 

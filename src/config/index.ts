@@ -20,9 +20,10 @@ export const envConfig = {
 export const riskParams: RiskParams = {
   maxAllocationPerCoin: 0.30,
   maxTotalDeployment: 0.75,
-  minTradeUsdt: 15,
+  minTradeUsdt: 5,
   cooldownMinutes: 15,
   maxDailyLossPercent: 0.05,
+  trailingStopPercent: 0.04,
 };
 
 export const botConfig: BotConfig = {
@@ -43,3 +44,4 @@ export const DATA_DIR = 'data';
 export const TRADE_HISTORY_FILE = `${DATA_DIR}/trade-history.json`;
 export const PORTFOLIO_STATE_FILE = `${DATA_DIR}/portfolio-state.json`;
 export const DAILY_SNAPSHOT_FILE = `${DATA_DIR}/daily-snapshot.json`;
+export const TRAILING_STOPS_FILE = `${DATA_DIR}/trailing-stops.json`;

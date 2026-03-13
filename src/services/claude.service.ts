@@ -5,6 +5,7 @@ import {
   ClaudeResponse,
   MarketData,
   PortfolioState,
+  SentimentData,
   TradeRecord
 } from '../types';
 
@@ -28,10 +29,19 @@ Your trading style:
 - You consider cross-pair dynamics (BTC weakness often drags alts down)
 - You are not afraid to stay in cash when no clear setups exist
 
+Sentiment context:
+- The Crypto Fear & Greed Index is provided (0-100). Use it as a contrarian signal:
+  - Extreme Fear (0-24): historically a good buying opportunity. Be more willing to enter positions.
+  - Fear (25-49): lean slightly bullish if technicals confirm.
+  - Neutral (50): no bias from sentiment.
+  - Greed (51-74): be more cautious, tighten entry criteria.
+  - Extreme Greed (75-100): high risk of reversal. Avoid new buys, consider taking profits.
+
 Risk context (enforced by code, but consider in your analysis):
 - Max ${(botConfig.riskParams.maxAllocationPerCoin * 100).toFixed(0)}% of portfolio per coin
 - Max ${(botConfig.riskParams.maxTotalDeployment * 100).toFixed(0)}% total deployment (always keep cash reserve)
 - Min trade size: $${botConfig.riskParams.minTradeUsdt}
+- Trailing stop-loss at ${(botConfig.riskParams.trailingStopPercent * 100).toFixed(0)}% from peak is enforced in code -- you don't need to micro-manage downside protection
 
 You MUST respond with valid JSON matching this exact schema:
 {
@@ -131,8 +141,12 @@ export async function getTradeDecisions(
   marketData: MarketData[],
   portfolio: PortfolioState,
   recentTrades: TradeRecord[],
+  sentiment: SentimentData,
 ): Promise<ClaudeResponse> {
   const userPrompt = [
+    '--- MARKET SENTIMENT ---',
+    `Fear & Greed Index: ${sentiment.value}/100 (${sentiment.label})`,
+    '',
     '--- MARKET DATA ---',
     formatMarketData(marketData),
     '',

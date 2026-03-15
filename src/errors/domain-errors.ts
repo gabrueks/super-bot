@@ -38,6 +38,27 @@ export class ExecutionBlockedError extends DomainError {
   }
 }
 
+export class MarginUnavailableError extends DomainError {
+  constructor(message: string) {
+    super('margin_unavailable', message);
+    this.name = 'MarginUnavailableError';
+  }
+}
+
+export class LeverageInvalidError extends DomainError {
+  constructor(message: string) {
+    super('leverage_invalid', message);
+    this.name = 'LeverageInvalidError';
+  }
+}
+
+export class PositionNotFoundError extends DomainError {
+  constructor(message: string) {
+    super('position_not_found', message);
+    this.name = 'PositionNotFoundError';
+  }
+}
+
 export function toFailureCode(error: unknown): CycleFailureCode {
   if (error instanceof DomainError) {
     return error.code;

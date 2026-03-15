@@ -119,9 +119,8 @@ function startBookTickerStream(symbols: string[]): void {
   log('WS-CACHE', `Book ticker stream started for ${symbols.join(', ')}`);
 }
 
-export async function initMarketStreams(): Promise<void> {
+export async function initMarketStreams(pairs: string[] = botConfig.tradingPairs): Promise<void> {
   log('WS-CACHE', 'Initializing WebSocket market streams...');
-  const pairs = botConfig.tradingPairs;
 
   for (const symbol of pairs) {
     for (const tf of TIMEFRAMES) {
@@ -168,8 +167,7 @@ export function getCachedBookTicker(symbol: string): OrderBookSnapshot | null {
   return bookTickerCache.get(symbol) ?? null;
 }
 
-export function isCacheReady(): boolean {
-  const pairs = botConfig.tradingPairs;
+export function isCacheReady(pairs: string[] = botConfig.tradingPairs): boolean {
   for (const symbol of pairs) {
     if (!tickerCache.has(symbol)) return false;
     for (const tf of TIMEFRAMES) {

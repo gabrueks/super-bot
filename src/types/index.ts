@@ -125,6 +125,9 @@ export type CycleFailureCode =
   | 'invalid_model_output'
   | 'market_data_unavailable'
   | 'execution_blocked'
+  | 'margin_unavailable'
+  | 'leverage_invalid'
+  | 'position_not_found'
   | 'unknown_error';
 
 export interface BotConfig {
@@ -177,4 +180,79 @@ export interface QualitySummary {
   executionErrorRate: number;
   approvalRate: number;
   lastFailureCode?: CycleFailureCode;
+}
+
+export type ShortTradeAction = 'OPEN_SHORT' | 'CLOSE_SHORT' | 'HOLD';
+
+export interface ShortPosition {
+  symbol: string;
+  quantity: number;
+  entryPrice: number;
+  currentPrice: number;
+  unrealizedPnl: number;
+  unrealizedPnlPercent: number;
+  notionalValue: number;
+}
+
+export interface ShortPortfolioState {
+  availableUsdt: number;
+  totalValue: number;
+  positions: ShortPosition[];
+  lastUpdated: number;
+}
+
+export interface ShortTradeRecord {
+  id: string;
+  symbol: string;
+  side: 'OPEN_SHORT' | 'CLOSE_SHORT';
+  quantity: number;
+  price: number;
+  total: number;
+  timestamp: number;
+  reasoning: string;
+}
+
+export interface ShortTradeDecision {
+  symbol: string;
+  action: ShortTradeAction;
+  percentageOfAvailable: number;
+  reasoning: string;
+}
+
+export interface ShortClaudeResponse {
+  decisions: ShortTradeDecision[];
+  marketSummary: string;
+}
+
+export interface ShortRiskCheckResult {
+  approved: boolean;
+  reason?: string;
+  adjustedNotionalUsdt?: number;
+}
+
+export interface ShortCycleResult {
+  timestamp: number;
+  decisionsReceived: number;
+  decisionsApproved: number;
+  tradesExecuted: number;
+  trades: ShortTradeRecord[];
+  errors: string[];
+  failureCode?: CycleFailureCode;
+}
+
+export interface ShortRiskParams {
+  maxShortAllocationPerCoin: number;
+  maxTotalShortExposure: number;
+  minTradeUsdt: number;
+  cooldownMinutes: number;
+  maxDailyLossPercent: number;
+  defaultLeverage: number;
+}
+
+export interface ShortBotConfig {
+  tradingPairs: string[];
+  cronInterval: string;
+  riskParams: ShortRiskParams;
+  claudeModel: string;
+  stepSizes: Record<string, number>;
 }

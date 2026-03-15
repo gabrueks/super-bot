@@ -5,7 +5,11 @@
   "main": "src/index.ts",
   "scripts": {
     "start": "tsx src/index.ts",
+    "start:short": "tsx src/index-short.ts",
+    "start:parallel": "tsx src/index-parallel.ts",
     "dev": "tsx watch src/index.ts",
+    "dev:short": "tsx watch src/index-short.ts",
+    "dev:parallel": "tsx watch src/index-parallel.ts",
     "build": "tsc",
     "typecheck": "tsc --noEmit"
   },

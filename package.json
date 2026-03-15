@@ -4,7 +4,7 @@
   "description": "Autonomous crypto trading bot powered by Claude AI",
   "main": "src/index.ts",
   "scripts": {
-    "start": "tsx src/index.ts",
+    "start": "tsx src/index-parallel.ts",
     "start:short": "tsx src/index-short.ts",
     "start:parallel": "tsx src/index-parallel.ts",
     "dev": "tsx watch src/index.ts",

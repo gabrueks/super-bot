@@ -1,7 +1,12 @@
 import { createHmac } from 'crypto';
 import { envConfig, shortBotConfig } from '../config';
 import { log } from '../logger';
-import { LeverageInvalidError, MarginUnavailableError, PositionNotFoundError } from '../errors/domain-errors';
+import {
+  ExecutionBlockedError,
+  LeverageInvalidError,
+  MarginUnavailableError,
+  PositionNotFoundError,
+} from '../errors/domain-errors';
 
 const RATE_LIMIT_STATUS_CODES = new Set([418, 429]);
 const MAX_RETRY_DELAY_MS = 5_000;
@@ -60,6 +65,102 @@ export interface FuturesOrderResult {
 
 let futuresCircuitOpenUntil = 0;
 const leverageConfiguredSymbols = new Set<string>();
+
+function parseFiniteNumber(value: string, field: string): number {
+  const parsed = Number.parseFloat(value);
+  if (!Number.isFinite(parsed)) {
+    throw new ExecutionBlockedError(`Invalid ${field} value from Binance Futures`);
+  }
+  return parsed;
+}
+
+function parseAccountBalance(value: string, field: string): number {
+  const parsed = Number.parseFloat(value);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    throw new MarginUnavailableError(`Invalid ${field} from Binance Futures account state`);
+  }
+  return parsed;
+}
+
+function normalizeShortPositionFromAccount(position: {
+  symbol: string;
+  positionAmt: string;
+  entryPrice: string;
+  markPrice: string;
+  unrealizedProfit: string;
+  notional: string;
+}): FuturesPosition | null {
+  const rawAmt = Number.parseFloat(position.positionAmt);
+  const quantity = Math.abs(rawAmt);
+  const entryPrice = Number.parseFloat(position.entryPrice);
+
+  if (rawAmt >= 0 || !(quantity > 0) || !Number.isFinite(entryPrice) || entryPrice <= 0) {
+    return null;
+  }
+
+  const parsedMarkPrice = Number.parseFloat(position.markPrice);
+  const markPrice = Number.isFinite(parsedMarkPrice) && parsedMarkPrice > 0
+    ? parsedMarkPrice
+    : entryPrice;
+
+  const parsedUnrealizedPnl = Number.parseFloat(position.unrealizedProfit);
+  const unrealizedPnl = Number.isFinite(parsedUnrealizedPnl) ? parsedUnrealizedPnl : 0;
+
+  const parsedNotional = Math.abs(Number.parseFloat(position.notional));
+  const notionalValue = Number.isFinite(parsedNotional) && parsedNotional > 0
+    ? parsedNotional
+    : quantity * markPrice;
+
+  return {
+    symbol: position.symbol,
+    quantity,
+    entryPrice,
+    markPrice,
+    unrealizedPnl,
+    notionalValue,
+  };
+}
+
+function parseOrderResult(
+  operation: 'openShort' | 'closeShort',
+  symbol: string,
+  order: {
+    symbol: string;
+    side: 'BUY' | 'SELL';
+    status: string;
+    executedQty: string;
+    avgPrice: string;
+    cumQuote: string;
+  },
+): FuturesOrderResult {
+  const executedQty = parseFiniteNumber(order.executedQty, `${operation} executedQty for ${symbol}`);
+  if (!(executedQty > 0)) {
+    throw new ExecutionBlockedError(`Binance Futures ${operation} returned zero executed quantity for ${symbol}`);
+  }
+
+  const cummulativeQuoteQty = parseFiniteNumber(order.cumQuote, `${operation} cumQuote for ${symbol}`);
+  if (cummulativeQuoteQty < 0) {
+    throw new ExecutionBlockedError(`Binance Futures ${operation} returned negative quote quantity for ${symbol}`);
+  }
+
+  const parsedAvgPrice = Number.parseFloat(order.avgPrice);
+  const avgPrice = Number.isFinite(parsedAvgPrice) && parsedAvgPrice > 0
+    ? parsedAvgPrice
+    : cummulativeQuoteQty / executedQty;
+
+  if (!(avgPrice > 0)) {
+    throw new ExecutionBlockedError(`Binance Futures ${operation} returned invalid average price for ${symbol}`);
+  }
+
+  return {
+    symbol: order.symbol,
+    side: order.side,
+    executedQty,
+    avgPrice,
+    cummulativeQuoteQty,
+    status: order.status,
+  };
+}
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
@@ -251,24 +352,12 @@ export async function fetchFuturesAccountState(): Promise<FuturesAccountState> {
   );
 
   const positions = account.positions
-    .map((p) => {
-      const amt = parseFloat(p.positionAmt);
-      return {
-        symbol: p.symbol,
-        quantity: Math.abs(amt),
-        entryPrice: parseFloat(p.entryPrice),
-        markPrice: parseFloat(p.markPrice),
-        unrealizedPnl: parseFloat(p.unrealizedProfit),
-        notionalValue: Math.abs(parseFloat(p.notional)),
-        rawAmt: amt,
-      };
-    })
-    .filter((p) => p.rawAmt < 0 && p.quantity > 0 && Number.isFinite(p.entryPrice))
-    .map(({ rawAmt: _rawAmt, ...position }) => position);
+    .map((position) => normalizeShortPositionFromAccount(position))
+    .filter((position): position is FuturesPosition => position !== null);
 
   return {
-    availableUsdt: parseFloat(account.availableBalance),
-    totalWalletBalance: parseFloat(account.totalWalletBalance),
+    availableUsdt: parseAccountBalance(account.availableBalance, 'availableBalance'),
+    totalWalletBalance: parseAccountBalance(account.totalWalletBalance, 'totalWalletBalance'),
     positions,
   };
 }
@@ -321,14 +410,7 @@ export async function openShortPosition(symbol: string, quantity: number): Promi
     3,
   );
 
-  return {
-    symbol: order.symbol,
-    side: order.side,
-    executedQty: parseFloat(order.executedQty),
-    avgPrice: parseFloat(order.avgPrice),
-    cummulativeQuoteQty: parseFloat(order.cumQuote),
-    status: order.status,
-  };
+  return parseOrderResult('openShort', symbol, order);
 }
 
 export async function closeShortPosition(symbol: string, quantity: number): Promise<FuturesOrderResult> {
@@ -357,12 +439,5 @@ export async function closeShortPosition(symbol: string, quantity: number): Prom
     3,
   );
 
-  return {
-    symbol: order.symbol,
-    side: order.side,
-    executedQty: parseFloat(order.executedQty),
-    avgPrice: parseFloat(order.avgPrice),
-    cummulativeQuoteQty: parseFloat(order.cumQuote),
-    status: order.status,
-  };
+  return parseOrderResult('closeShort', symbol, order);
 }

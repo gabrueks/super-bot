@@ -45,7 +45,9 @@ function validateOpenShort(
   }
 
   const existing = portfolio.positions.find((p) => p.symbol === decision.symbol);
-  const existingNotional = existing?.notionalValue ?? 0;
+  const existingNotional = existing && Number.isFinite(existing.notionalValue) && existing.notionalValue > 0
+    ? existing.notionalValue
+    : 0;
   const newTotalPositionNotional = existingNotional + requestedNotionalUsdt;
   const maxAllowed = portfolio.totalValue * shortBotConfig.riskParams.maxShortAllocationPerCoin;
   if (newTotalPositionNotional > maxAllowed) {
@@ -63,7 +65,12 @@ function validateOpenShort(
     };
   }
 
-  const deployed = portfolio.positions.reduce((sum, p) => sum + p.notionalValue, 0);
+  const deployed = portfolio.positions.reduce((sum, p) => {
+    if (Number.isFinite(p.notionalValue) && p.notionalValue > 0) {
+      return sum + p.notionalValue;
+    }
+    return sum;
+  }, 0);
   const deploymentAfterTrade = deployed + requestedNotionalUsdt;
   const maxDeployment = portfolio.totalValue * shortBotConfig.riskParams.maxTotalShortExposure;
   if (deploymentAfterTrade > maxDeployment) {
@@ -89,10 +96,20 @@ function validateCloseShort(
   portfolio: ShortPortfolioState,
 ): ShortRiskCheckResult {
   const position = portfolio.positions.find((p) => p.symbol === decision.symbol);
-  if (!position || position.quantity <= 0) {
+  if (
+    !position
+    || !Number.isFinite(position.quantity)
+    || position.quantity <= 0
+  ) {
     return {
       approved: false,
       reason: `No short position to close for ${decision.symbol}`,
+    };
+  }
+  if (!Number.isFinite(position.notionalValue) || position.notionalValue <= 0) {
+    return {
+      approved: false,
+      reason: `Short position has invalid notional value for ${decision.symbol}`,
     };
   }
   if (position.notionalValue < shortBotConfig.riskParams.minTradeUsdt) {

@@ -35,6 +35,11 @@ export const botConfig: BotConfig = {
   cronInterval: '*/15 * * * *',
   riskParams,
   claudeModel: 'claude-sonnet-4-20250514',
+  stepSizes: {
+    BTCUSDT: 0.00001,
+    ETHUSDT: 0.0001,
+    SOLUSDT: 0.01,
+  },
 };
 
 export const TIMEFRAMES = ['15m', '1h', '4h'] as const;
@@ -45,3 +50,4 @@ export const TRADE_HISTORY_FILE = `${DATA_DIR}/trade-history.json`;
 export const PORTFOLIO_STATE_FILE = `${DATA_DIR}/portfolio-state.json`;
 export const DAILY_SNAPSHOT_FILE = `${DATA_DIR}/daily-snapshot.json`;
 export const TRAILING_STOPS_FILE = `${DATA_DIR}/trailing-stops.json`;
+export const QUALITY_METRICS_FILE = `${DATA_DIR}/quality-metrics.json`;

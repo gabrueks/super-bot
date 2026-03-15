@@ -1,9 +1,10 @@
 import cron from 'node-cron';
 import { botConfig } from './config';
 import { runCycle } from './bot';
-import { initMarketStreams, shutdownMarketStreams } from './services/market-cache.service';
+import { initMarketStreams, isCacheReady, shutdownMarketStreams } from './services/market-cache.service';
 import { refreshBalanceCache, startBalanceReconciler } from './services/portfolio.service';
 import { log } from './logger';
+import { MarketDataUnavailableError } from './errors/domain-errors';
 
 function printBanner(): void {
   const lines = [
@@ -26,8 +27,7 @@ async function main(): Promise<void> {
 
   log('INIT', 'Connecting WebSocket market data streams...');
   await initMarketStreams();
-  log('INIT', 'WebSocket streams ready, waiting 3s for initial ticker data...');
-  await new Promise((r) => setTimeout(r, 3000));
+  await waitForCacheReady(20_000);
 
   try {
     await refreshBalanceCache();
@@ -42,7 +42,11 @@ async function main(): Promise<void> {
   await runCycle();
 
   const task = cron.schedule(botConfig.cronInterval, async () => {
-    await runCycle();
+    try {
+      await runCycle();
+    } catch (error) {
+      log('CYCLE', `Scheduled cycle crashed: ${error instanceof Error ? error.message : String(error)}`);
+    }
   });
 
   const shutdown = (): void => {
@@ -58,4 +62,22 @@ async function main(): Promise<void> {
   process.on('SIGTERM', shutdown);
 }
 
-main();
+async function waitForCacheReady(timeoutMs: number): Promise<void> {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt <= timeoutMs) {
+    if (isCacheReady()) {
+      log('INIT', 'Market cache is ready for first cycle');
+      return;
+    }
+    await new Promise((resolve) => {
+      setTimeout(resolve, 250);
+    });
+  }
+  throw new MarketDataUnavailableError(`Market cache did not become ready within ${timeoutMs}ms`);
+}
+
+main().catch((error) => {
+  log('INIT', `Fatal startup failure: ${error instanceof Error ? error.message : String(error)}`);
+  shutdownMarketStreams();
+  process.exit(1);
+});

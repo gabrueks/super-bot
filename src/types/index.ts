@@ -117,13 +117,22 @@ export interface CycleResult {
   tradesExecuted: number;
   trades: TradeRecord[];
   errors: string[];
+  failureCode?: CycleFailureCode;
 }
+
+export type CycleFailureCode =
+  | 'model_unavailable'
+  | 'invalid_model_output'
+  | 'market_data_unavailable'
+  | 'execution_blocked'
+  | 'unknown_error';
 
 export interface BotConfig {
   tradingPairs: string[];
   cronInterval: string;
   riskParams: RiskParams;
   claudeModel: string;
+  stepSizes: Record<string, number>;
 }
 
 export interface RiskParams {
@@ -146,4 +155,26 @@ export interface TrailingStop {
   entryPrice: number;
   peakPrice: number;
   activatedAt: number;
+}
+
+export interface QualityCycleMetric {
+  timestamp: number;
+  cycleDurationMs: number;
+  decisionsReceived: number;
+  decisionsApproved: number;
+  tradesExecuted: number;
+  rejectionCount: number;
+  errorCount: number;
+  invalidDecisionRate: number;
+  executionSuccessRate: number;
+  approvalRate: number;
+  failureCode?: CycleFailureCode;
+}
+
+export interface QualitySummary {
+  recentCycles: number;
+  invalidDecisionRate: number;
+  executionErrorRate: number;
+  approvalRate: number;
+  lastFailureCode?: CycleFailureCode;
 }

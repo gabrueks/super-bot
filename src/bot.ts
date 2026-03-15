@@ -15,6 +15,12 @@ import { executeDecisions } from './services/trading.service';
 import { fetchFearAndGreed } from './services/sentiment.service';
 import { checkTrailingStops, removeStop } from './services/stop-loss.service';
 import { log, logError } from './logger';
+import {
+  ExecutionBlockedError,
+  MarketDataUnavailableError,
+  toFailureCode,
+} from './errors/domain-errors';
+import { recordCycleQuality } from './services/eval.service';
 
 let running = false;
 
@@ -77,34 +83,30 @@ export async function runCycle(): Promise<CycleResult | null> {
 
     printCycleResult(cycleResult, claudeResponse.marketSummary);
     log('CYCLE', `=== Cycle complete in ${Date.now() - cycleStart}ms ===`);
+    recordCycleQuality(cycleResult, Date.now() - cycleStart);
 
     return cycleResult;
   } catch (err) {
+    const failureCode = toFailureCode(err);
     logError('CYCLE', 'Cycle failed', err);
     if (err instanceof Error && err.stack) {
       process.stderr.write(err.stack + '\n');
     }
-    return {
+    const failureResult: CycleResult = {
       timestamp: Date.now(),
       decisionsReceived: 0,
       decisionsApproved: 0,
       tradesExecuted: 0,
       trades: [],
       errors: [`Cycle failed: ${err instanceof Error ? err.message : String(err)}`],
+      failureCode,
     };
+    recordCycleQuality(failureResult, Date.now() - cycleStart);
+    return failureResult;
   } finally {
     running = false;
   }
 }
-
-const STEP_SIZES: Record<string, number> = {
-  BTCUSDT: 0.00001,
-  ETHUSDT: 0.0001,
-  BNBUSDT: 0.001,
-  SOLUSDT: 0.01,
-  XRPUSDT: 0.1,
-  ADAUSDT: 0.1,
-};
 
 async function processTrailingStops(
   priceMap: Record<string, number>,
@@ -123,7 +125,7 @@ async function processTrailingStops(
         continue;
       }
 
-      const stepSize = STEP_SIZES[stop.symbol] ?? 0.001;
+      const stepSize = botConfig.stepSizes[stop.symbol] ?? 0.001;
       const orderResult = await placeMarketSellByQty(
         stop.symbol,
         position.quantity,
@@ -155,6 +157,9 @@ async function processTrailingStops(
       log('CYCLE', `STOP-LOSS SELL ${stop.symbol}: qty=${trade.quantity.toFixed(6)} @ $${trade.price.toFixed(2)} = $${trade.total.toFixed(2)}`);
     } catch (err) {
       logError('CYCLE', `Failed to execute trailing stop sell for ${stop.symbol}`, err);
+      throw new ExecutionBlockedError(
+        `Trailing stop sell execution failed for ${stop.symbol}: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
   }
 }
@@ -165,24 +170,15 @@ function gatherMarketData(): MarketData[] {
   for (const symbol of botConfig.tradingPairs) {
     log('MARKET', `Reading cached data for ${symbol}...`);
 
-    const ticker = getCachedTicker(symbol) ?? {
-      symbol,
-      price: 0,
-      priceChangePercent: 0,
-      highPrice: 0,
-      lowPrice: 0,
-      volume: 0,
-      quoteVolume: 0,
-    };
+    const ticker = getCachedTicker(symbol);
+    if (!ticker || !Number.isFinite(ticker.price) || ticker.price <= 0) {
+      throw new MarketDataUnavailableError(`Ticker data unavailable for ${symbol}`);
+    }
 
-    const orderBook = getCachedBookTicker(symbol) ?? {
-      symbol,
-      bidAskRatio: 1,
-      topBidPrice: 0,
-      topAskPrice: 0,
-      bidDepth: 0,
-      askDepth: 0,
-    };
+    const orderBook = getCachedBookTicker(symbol);
+    if (!orderBook || !Number.isFinite(orderBook.topBidPrice) || !Number.isFinite(orderBook.topAskPrice)) {
+      throw new MarketDataUnavailableError(`Order book data unavailable for ${symbol}`);
+    }
 
     const technicalAnalysis = analyzeSymbol(symbol);
 

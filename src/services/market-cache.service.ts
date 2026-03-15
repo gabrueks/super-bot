@@ -1,7 +1,7 @@
 import { Kline, TickerStats, OrderBookSnapshot } from '../types';
 import { botConfig, TIMEFRAMES, Timeframe } from '../config';
 import { fetchCandles, getClient } from './binance.service';
-import { log } from '../logger';
+import { log, logError } from '../logger';
 
 const KLINE_BUFFER_SIZE = 60;
 const BACKFILL_REST_SPACING_MS = 150;
@@ -148,7 +148,9 @@ export function shutdownMarketStreams(): void {
   for (const cleanup of cleanupFns) {
     try {
       cleanup();
-    } catch {}
+    } catch (error) {
+      logError('WS-CACHE', 'Failed to close WebSocket cleanup handler', error);
+    }
   }
   cleanupFns.length = 0;
 }

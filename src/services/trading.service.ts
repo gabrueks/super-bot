@@ -5,14 +5,17 @@ import {
   RiskCheckResult,
   CycleResult,
 } from '../types';
+import { botConfig } from '../config';
 import { validateDecision } from './risk.service';
 import {
   placeMarketOrder,
   placeMarketSellByQty,
+  isBinanceRestCircuitOpen,
 } from './binance.service';
 import { appendTrade } from './portfolio.service';
 import { registerStop, removeStop } from './stop-loss.service';
 import { log, logError } from '../logger';
+import { ExecutionBlockedError } from '../errors/domain-errors';
 
 const TRADE_EXECUTION_SPACING_MS = 300;
 
@@ -30,6 +33,10 @@ export async function executeDecisions(
   decisions: TradeDecision[],
   portfolio: PortfolioState,
 ): Promise<CycleResult> {
+  if (isBinanceRestCircuitOpen()) {
+    throw new ExecutionBlockedError('Binance REST circuit is open');
+  }
+
   const result: CycleResult = {
     timestamp: Date.now(),
     decisionsReceived: decisions.length,
@@ -131,10 +138,11 @@ async function executeSingleTrade(
     );
     if (!position) return null;
 
-    const sellQty = position.quantity * (decision.percentageOfAvailable / 100);
+    const boundedPercent = Math.min(100, Math.max(0, decision.percentageOfAvailable));
+    const sellQty = position.quantity * (boundedPercent / 100);
 
     const stepSize = getStepSize(decision.symbol);
-    log('TRADING', `Selling ${decision.symbol}: qty=${sellQty.toFixed(8)} (${decision.percentageOfAvailable}% of position)`);
+    log('TRADING', `Selling ${decision.symbol}: qty=${sellQty.toFixed(8)} (${boundedPercent}% of position)`);
 
     const orderResult = await placeMarketSellByQty(
       decision.symbol,
@@ -157,15 +165,6 @@ async function executeSingleTrade(
   return null;
 }
 
-const STEP_SIZES: Record<string, number> = {
-  BTCUSDT: 0.00001,
-  ETHUSDT: 0.0001,
-  BNBUSDT: 0.001,
-  SOLUSDT: 0.01,
-  XRPUSDT: 0.1,
-  ADAUSDT: 0.1,
-};
-
 function getStepSize(symbol: string): number {
-  return STEP_SIZES[symbol] ?? 0.001;
+  return botConfig.stepSizes[symbol] ?? 0.001;
 }

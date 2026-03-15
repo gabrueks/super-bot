@@ -6,8 +6,11 @@ import {
   MarketData,
   PortfolioState,
   SentimentData,
-  TradeRecord
+  TradeAction,
+  TradeRecord,
 } from '../types';
+import { getQualitySummary } from './eval.service';
+import { InvalidModelOutputError, ModelUnavailableError } from '../errors/domain-errors';
 
 let anthropic: Anthropic;
 
@@ -56,12 +59,34 @@ You MUST respond with valid JSON matching this exact schema:
   "marketSummary": "1-2 sentence overall market read"
 }
 
+Good example:
+{
+  "decisions": [
+    {"symbol":"BTCUSDT","action":"HOLD","percentageOfAvailable":0,"reasoning":"Momentum mixed across 15m/1h/4h and spread quality is average."},
+    {"symbol":"ETHUSDT","action":"BUY","percentageOfAvailable":18,"reasoning":"Bullish EMA stack with improving MACD histogram and supportive volume ratio."},
+    {"symbol":"SOLUSDT","action":"SELL","percentageOfAvailable":35,"reasoning":"Trend weakening with bearish crossover and loss of relative strength."}
+  ],
+  "marketSummary":"Risk-on pockets remain selective; prioritize high-conviction setups and keep reserve cash."
+}
+
+Bad examples (never do this):
+- Missing a configured symbol in decisions
+- Duplicating the same symbol twice
+- Invalid action values like "buy" or "EXIT"
+- percentageOfAvailable outside 0-100
+- Empty reasoning or text outside the JSON object
+
 Rules:
 - Include a decision for EVERY symbol provided, even if HOLD
 - percentageOfAvailable is the % of available USDT to use for BUY, or % of held quantity to sell for SELL
 - For HOLD, set percentageOfAvailable to 0
 - Be decisive. If indicators are mixed, lean towards HOLD
 - Never output anything outside the JSON object`;
+
+const TRANSIENT_STATUS_CODES = new Set([408, 409, 425, 429, 500, 502, 503, 504, 529]);
+const ACTIONS: TradeAction[] = ['BUY', 'SELL', 'HOLD'];
+const MAX_MODEL_ATTEMPTS = 2;
+const RETRY_DELAY_MS = 600;
 
 function formatMarketData(data: MarketData[]): string {
   return data
@@ -137,32 +162,147 @@ function formatRecentTrades(trades: TradeRecord[]): string {
   ].join('\n');
 }
 
-export async function getTradeDecisions(
-  marketData: MarketData[],
-  portfolio: PortfolioState,
-  recentTrades: TradeRecord[],
-  sentiment: SentimentData,
-): Promise<ClaudeResponse> {
-  const userPrompt = [
-    '--- MARKET SENTIMENT ---',
-    `Fear & Greed Index: ${sentiment.value}/100 (${sentiment.label})`,
-    '',
-    '--- MARKET DATA ---',
-    formatMarketData(marketData),
-    '',
-    '--- PORTFOLIO ---',
-    formatPortfolio(portfolio),
-    '',
-    '--- RECENT TRADES ---',
-    formatRecentTrades(recentTrades),
-    '',
-    `Current time: ${new Date().toISOString()}`,
-    '',
-    'Analyze all pairs and return your trading decisions as JSON.',
+function formatQualitySummary(): string {
+  const summary = getQualitySummary(20);
+  if (summary.recentCycles === 0) {
+    return 'No prior quality history available.';
+  }
+
+  const invalidPct = (summary.invalidDecisionRate * 100).toFixed(1);
+  const execErrPct = (summary.executionErrorRate * 100).toFixed(1);
+  const approvalPct = (summary.approvalRate * 100).toFixed(1);
+
+  return [
+    `Recent cycles analyzed: ${summary.recentCycles}`,
+    `Invalid decision rate: ${invalidPct}%`,
+    `Execution error rate: ${execErrPct}%`,
+    `Decision approval rate: ${approvalPct}%`,
+    `Last cycle failure code: ${summary.lastFailureCode ?? 'none'}`,
   ].join('\n');
+}
 
-  log('CLAUDE', `Sending prompt to ${botConfig.claudeModel} (${userPrompt.length} chars)`);
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
 
+function isObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function sanitizeJsonText(text: string): string {
+  const trimmed = text.trim();
+  if (!trimmed.startsWith('```')) {
+    return trimmed;
+  }
+  return trimmed.replace(/^```(?:json)?\s*/, '').replace(/\s*```$/, '');
+}
+
+function isTransientClaudeError(error: unknown): boolean {
+  if (!(error && typeof error === 'object')) {
+    return false;
+  }
+  const errorLike = error as {
+    status?: number;
+    statusCode?: number;
+    error?: { type?: string; status?: number };
+    message?: string;
+  };
+  const status = errorLike.status ?? errorLike.statusCode ?? errorLike.error?.status;
+  if (typeof status === 'number' && TRANSIENT_STATUS_CODES.has(status)) {
+    return true;
+  }
+  const message = (errorLike.message ?? '').toLowerCase();
+  return (
+    message.includes('timeout') ||
+    message.includes('temporarily unavailable') ||
+    message.includes('rate limit') ||
+    message.includes('overloaded')
+  );
+}
+
+function validateDecisionPayload(
+  payload: unknown,
+  expectedSymbols: string[],
+): ClaudeResponse {
+  if (!isObject(payload)) {
+    throw new InvalidModelOutputError('Claude response must be a JSON object');
+  }
+
+  const decisionsRaw = payload.decisions;
+  if (!Array.isArray(decisionsRaw)) {
+    throw new InvalidModelOutputError('Claude response must include a decisions array');
+  }
+
+  const marketSummaryRaw = payload.marketSummary;
+  if (typeof marketSummaryRaw !== 'string' || marketSummaryRaw.trim().length === 0) {
+    throw new InvalidModelOutputError('Claude response must include non-empty marketSummary');
+  }
+
+  const expectedSet = new Set(expectedSymbols);
+  const seen = new Set<string>();
+  const decisions = decisionsRaw.map((item, index) => {
+    if (!isObject(item)) {
+      throw new InvalidModelOutputError(`Decision at index ${index} must be an object`);
+    }
+    const symbol = item.symbol;
+    const action = item.action;
+    const percentageOfAvailable = item.percentageOfAvailable;
+    const reasoning = item.reasoning;
+
+    if (typeof symbol !== 'string' || symbol.length === 0) {
+      throw new InvalidModelOutputError(`Decision at index ${index} has invalid symbol`);
+    }
+    if (!expectedSet.has(symbol)) {
+      throw new InvalidModelOutputError(`Decision symbol ${symbol} is not configured`);
+    }
+    if (seen.has(symbol)) {
+      throw new InvalidModelOutputError(`Duplicate decision for symbol ${symbol}`);
+    }
+    seen.add(symbol);
+
+    if (typeof action !== 'string' || !ACTIONS.includes(action as TradeAction)) {
+      throw new InvalidModelOutputError(`Decision for ${symbol} has invalid action`);
+    }
+
+    if (
+      typeof percentageOfAvailable !== 'number' ||
+      !Number.isFinite(percentageOfAvailable) ||
+      percentageOfAvailable < 0 ||
+      percentageOfAvailable > 100
+    ) {
+      throw new InvalidModelOutputError(`Decision for ${symbol} has invalid percentageOfAvailable`);
+    }
+
+    if (typeof reasoning !== 'string' || reasoning.trim().length === 0) {
+      throw new InvalidModelOutputError(`Decision for ${symbol} must include non-empty reasoning`);
+    }
+
+    if (action === 'HOLD' && percentageOfAvailable !== 0) {
+      throw new InvalidModelOutputError(`Decision for ${symbol} must set 0 percentage for HOLD`);
+    }
+
+    return {
+      symbol,
+      action: action as TradeAction,
+      percentageOfAvailable,
+      reasoning,
+    };
+  });
+
+  if (seen.size !== expectedSet.size) {
+    const missingSymbols = expectedSymbols.filter((symbol) => !seen.has(symbol));
+    throw new InvalidModelOutputError(`Missing decision(s) for: ${missingSymbols.join(', ')}`);
+  }
+
+  return {
+    decisions,
+    marketSummary: marketSummaryRaw.trim(),
+  };
+}
+
+async function callClaude(userPrompt: string): Promise<string> {
   const response = await getClient().messages.create({
     model: botConfig.claudeModel,
     max_tokens: 2048,
@@ -174,39 +314,110 @@ export async function getTradeDecisions(
 
   const textBlock = response.content.find((b) => b.type === 'text');
   if (!textBlock || textBlock.type !== 'text') {
-    throw new Error('No text response from Claude');
+    throw new ModelUnavailableError('No text response from Claude');
   }
+  return textBlock.text;
+}
 
-  let jsonStr = textBlock.text.trim();
-  if (jsonStr.startsWith('```')) {
-    jsonStr = jsonStr.replace(/^```(?:json)?\s*/, '').replace(/\s*```$/, '');
-  }
-  log('CLAUDE', `Raw response: ${jsonStr})}`);
+export async function getTradeDecisions(
+  marketData: MarketData[],
+  portfolio: PortfolioState,
+  recentTrades: TradeRecord[],
+  sentiment: SentimentData,
+): Promise<ClaudeResponse> {
+  const userPrompt = [
+    '--- WEIGHTED INPUT BLOCKS ---',
+    '[WEIGHT 0.40] MARKET STRUCTURE',
+    formatMarketData(marketData),
+    '',
+    '[WEIGHT 0.25] PORTFOLIO + RISK POSITIONING',
+    formatPortfolio(portfolio),
+    '',
+    '[WEIGHT 0.20] MARKET SENTIMENT',
+    `Fear & Greed Index: ${sentiment.value}/100 (${sentiment.label})`,
+    '',
+    '[WEIGHT 0.10] EXECUTION CONTEXT',
+    formatRecentTrades(recentTrades.slice(-6)),
+    '',
+    '[WEIGHT 0.05] QUALITY FEEDBACK',
+    formatQualitySummary(),
+    '',
+    `Current time: ${new Date().toISOString()}`,
+    '',
+    `Configured symbols: ${botConfig.tradingPairs.join(', ')}`,
+    'Return decisions JSON only. No prose.',
+  ].join('\n');
 
-  let parsed: ClaudeResponse;
-  try {
-    parsed = JSON.parse(jsonStr) as ClaudeResponse;
-  } catch (e) {
-    logError('CLAUDE', 'Failed to parse JSON response', e);
-    logError('CLAUDE', `Full response was: ${jsonStr}`);
-    throw new Error(`Claude returned invalid JSON: ${(e as Error).message}`);
-  }
+  log('CLAUDE', `Sending prompt to ${botConfig.claudeModel} (${userPrompt.length} chars)`);
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= MAX_MODEL_ATTEMPTS; attempt++) {
+    try {
+      const prompt = attempt === 1
+        ? userPrompt
+        : [
+          userPrompt,
+          '',
+          'Your previous response was invalid. Return corrected JSON that strictly follows the schema and all rules.',
+        ].join('\n');
 
-  if (!parsed.decisions || !Array.isArray(parsed.decisions)) {
-    throw new Error('Invalid response structure from Claude');
-  }
+      const rawText = await callClaude(prompt);
+      const jsonStr = sanitizeJsonText(rawText);
+      log('CLAUDE', `Raw response: ${jsonStr}`);
+      const parsed = JSON.parse(jsonStr) as unknown;
+      const validated = validateDecisionPayload(parsed, botConfig.tradingPairs);
 
-  for (const d of parsed.decisions) {
-    if (!d.symbol || !d.action || d.percentageOfAvailable === undefined) {
-      throw new Error(`Invalid decision entry: ${JSON.stringify(d)}`);
+      const actionable = validated.decisions.filter((d) => d.action !== 'HOLD');
+      log('CLAUDE', `Decisions: ${validated.decisions.length} total, ${actionable.length} actionable`);
+      for (const d of validated.decisions) {
+        log('CLAUDE', `  ${d.symbol}: ${d.action} ${d.percentageOfAvailable}% -- ${d.reasoning}`);
+      }
+      return validated;
+    } catch (error) {
+      lastError = error;
+
+      const canRetryForInvalidOutput = error instanceof InvalidModelOutputError && attempt < MAX_MODEL_ATTEMPTS;
+      const canRetryForMalformedJson = error instanceof SyntaxError && attempt < MAX_MODEL_ATTEMPTS;
+      const canRetryForTransientFailure = isTransientClaudeError(error) && attempt < MAX_MODEL_ATTEMPTS;
+
+      if (canRetryForInvalidOutput) {
+        logError('CLAUDE', `Model output validation failed on attempt ${attempt}`, error);
+        await sleep(RETRY_DELAY_MS);
+        continue;
+      }
+
+      if (canRetryForMalformedJson) {
+        logError('CLAUDE', `Model returned malformed JSON on attempt ${attempt}`, error);
+        await sleep(RETRY_DELAY_MS);
+        continue;
+      }
+
+      if (canRetryForTransientFailure) {
+        logError('CLAUDE', `Transient Claude API failure on attempt ${attempt}`, error);
+        await sleep(RETRY_DELAY_MS);
+        continue;
+      }
+
+      if (error instanceof InvalidModelOutputError || error instanceof ModelUnavailableError) {
+        throw error;
+      }
+
+      if (isTransientClaudeError(error)) {
+        throw new ModelUnavailableError(
+          `Claude unavailable after ${attempt} attempt(s): ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+
+      if (error instanceof SyntaxError) {
+        throw new InvalidModelOutputError(`Claude returned invalid JSON: ${error.message}`);
+      }
+
+      throw new ModelUnavailableError(
+        `Claude request failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
   }
 
-  const actionable = parsed.decisions.filter((d) => d.action !== 'HOLD');
-  log('CLAUDE', `Decisions: ${parsed.decisions.length} total, ${actionable.length} actionable`);
-  for (const d of parsed.decisions) {
-    log('CLAUDE', `  ${d.symbol}: ${d.action} ${d.percentageOfAvailable}% -- ${d.reasoning}`);
-  }
-
-  return parsed;
+  throw new ModelUnavailableError(
+    `Claude request failed after retries: ${lastError instanceof Error ? lastError.message : String(lastError)}`,
+  );
 }

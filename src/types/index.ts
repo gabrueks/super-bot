@@ -75,6 +75,7 @@ export interface PortfolioState {
   totalValue: number;
   positions: Position[];
   lastUpdated: number;
+  isBalanceDataStale?: boolean;
 }
 
 export type TradeSide = 'BUY' | 'SELL';

@@ -1,9 +1,10 @@
 import { Kline, TickerStats, OrderBookSnapshot } from '../types';
 import { botConfig, TIMEFRAMES, Timeframe } from '../config';
-import { getClient } from './binance.service';
+import { fetchCandles, getClient } from './binance.service';
 import { log } from '../logger';
 
 const KLINE_BUFFER_SIZE = 60;
+const BACKFILL_REST_SPACING_MS = 150;
 
 const klineBuffers = new Map<string, Kline[]>();
 const tickerCache = new Map<string, TickerStats>();
@@ -19,7 +20,7 @@ async function backfillKlines(symbol: string, tf: Timeframe): Promise<void> {
   const key = cacheKey(symbol, tf);
   log('WS-CACHE', `Backfilling ${symbol} ${tf} klines from REST...`);
 
-  const raw = await getClient().candles({ symbol, interval: tf, limit: KLINE_BUFFER_SIZE });
+  const raw = await fetchCandles({ symbol, interval: tf, limit: KLINE_BUFFER_SIZE });
   const klines: Kline[] = raw.map((c) => ({
     openTime: c.openTime,
     open: parseFloat(c.open),
@@ -32,6 +33,12 @@ async function backfillKlines(symbol: string, tf: Timeframe): Promise<void> {
 
   klineBuffers.set(key, klines);
   log('WS-CACHE', `Backfilled ${klines.length} candles for ${symbol} ${tf}`);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
 }
 
 function startCandleStream(symbol: string, tf: Timeframe): void {
@@ -116,13 +123,12 @@ export async function initMarketStreams(): Promise<void> {
   log('WS-CACHE', 'Initializing WebSocket market streams...');
   const pairs = botConfig.tradingPairs;
 
-  const backfillPromises: Promise<void>[] = [];
   for (const symbol of pairs) {
     for (const tf of TIMEFRAMES) {
-      backfillPromises.push(backfillKlines(symbol, tf));
+      await backfillKlines(symbol, tf);
+      await sleep(BACKFILL_REST_SPACING_MS);
     }
   }
-  await Promise.all(backfillPromises);
   log('WS-CACHE', `Backfill complete for ${pairs.length} pairs x ${TIMEFRAMES.length} timeframes`);
 
   for (const symbol of pairs) {

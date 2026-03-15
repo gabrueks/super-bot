@@ -14,8 +14,16 @@ import { appendTrade } from './portfolio.service';
 import { registerStop, removeStop } from './stop-loss.service';
 import { log, logError } from '../logger';
 
+const TRADE_EXECUTION_SPACING_MS = 300;
+
 function generateTradeId(): string {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
 }
 
 export async function executeDecisions(
@@ -34,7 +42,8 @@ export async function executeDecisions(
   const actionable = decisions.filter((d) => d.action !== 'HOLD');
   log('TRADING', `Processing ${actionable.length} actionable decisions (${decisions.length - actionable.length} HOLDs skipped)`);
 
-  for (const decision of actionable) {
+  for (let i = 0; i < actionable.length; i++) {
+    const decision = actionable[i];
     log('TRADING', `Validating: ${decision.action} ${decision.symbol} ${decision.percentageOfAvailable}%`);
     const riskCheck = validateDecision(decision, portfolio);
 
@@ -75,6 +84,10 @@ export async function executeDecisions(
       result.errors.push(
         `ERROR executing ${decision.action} ${decision.symbol}: ${message}`,
       );
+    }
+
+    if (i < actionable.length - 1) {
+      await sleep(TRADE_EXECUTION_SPACING_MS);
     }
   }
 

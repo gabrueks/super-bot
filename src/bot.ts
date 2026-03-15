@@ -1,5 +1,5 @@
 import { botConfig } from './config';
-import { MarketData, CycleResult, TradeRecord } from './types';
+import { MarketData, CycleResult, TradeRecord, PortfolioState } from './types';
 import { placeMarketSellByQty } from './services/binance.service';
 import { analyzeSymbol } from './services/analysis.service';
 import { getCachedTicker, getCachedBookTicker } from './services/market-cache.service';
@@ -46,11 +46,9 @@ export async function runCycle(): Promise<CycleResult | null> {
     log('CYCLE', `Market data gathered for ${marketData.length} pairs (${Date.now() - cycleStart}ms)`);
 
     const priceMap = buildPriceMap(marketData);
-
-    await processTrailingStops(priceMap);
-
     log('CYCLE', 'Building portfolio state...');
     const portfolio = await buildPortfolioState(priceMap);
+    await processTrailingStops(priceMap, portfolio);
     log('CYCLE', `Portfolio: $${portfolio.availableUsdt.toFixed(2)} USDT available, $${portfolio.totalValue.toFixed(2)} total, ${portfolio.positions.length} positions`);
 
     if (getDailyStartValue() === null) {
@@ -110,13 +108,12 @@ const STEP_SIZES: Record<string, number> = {
 
 async function processTrailingStops(
   priceMap: Record<string, number>,
+  portfolio: PortfolioState,
 ): Promise<void> {
   const triggered = checkTrailingStops(priceMap);
   if (triggered.length === 0) return;
 
   log('CYCLE', `${triggered.length} trailing stop(s) triggered -- auto-selling`);
-
-  const portfolio = await buildPortfolioState(priceMap);
 
   for (const stop of triggered) {
     try {
@@ -146,6 +143,15 @@ async function processTrailingStops(
 
       appendTrade(trade);
       removeStop(stop.symbol);
+      portfolio.availableUsdt += trade.total;
+      position.quantity = Math.max(0, position.quantity - trade.quantity);
+      if (position.quantity === 0) {
+        portfolio.positions = portfolio.positions.filter((p) => p.symbol !== stop.symbol);
+      }
+      portfolio.totalValue = portfolio.availableUsdt + portfolio.positions.reduce(
+        (sum, p) => sum + p.quantity * p.currentPrice,
+        0,
+      );
       log('CYCLE', `STOP-LOSS SELL ${stop.symbol}: qty=${trade.quantity.toFixed(6)} @ $${trade.price.toFixed(2)} = $${trade.total.toFixed(2)}`);
     } catch (err) {
       logError('CYCLE', `Failed to execute trailing stop sell for ${stop.symbol}`, err);

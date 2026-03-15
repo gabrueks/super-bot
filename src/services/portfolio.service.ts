@@ -6,8 +6,23 @@ import {
   DAILY_SNAPSHOT_FILE,
   botConfig,
 } from '../config';
-import { fetchAccountBalances } from './binance.service';
+import {
+  AccountBalance,
+  BinanceRateLimitError,
+  fetchAccountBalances,
+} from './binance.service';
 import { log, logError } from '../logger';
+
+const BALANCE_CACHE_TTL_MS = 60_000;
+const STALE_BALANCE_MAX_AGE_MS = 15 * 60 * 1000;
+const BALANCE_RECONCILIATION_INTERVAL_MS = 5 * 60 * 1000;
+
+interface BalanceCache {
+  balances: AccountBalance[];
+  fetchedAt: number;
+}
+
+let balanceCache: BalanceCache | null = null;
 
 function ensureDataDir(): void {
   if (!fs.existsSync(DATA_DIR)) {
@@ -79,11 +94,89 @@ export function getDailyStartValue(): number | null {
   return todaySnap?.totalValue ?? null;
 }
 
+function cacheBalances(balances: AccountBalance[]): void {
+  balanceCache = {
+    balances,
+    fetchedAt: Date.now(),
+  };
+}
+
+function getCachedBalances(maxAgeMs: number): AccountBalance[] | null {
+  if (!balanceCache) return null;
+  const age = Date.now() - balanceCache.fetchedAt;
+  if (age > maxAgeMs) return null;
+  return balanceCache.balances;
+}
+
+export async function refreshBalanceCache(): Promise<void> {
+  const balances = await fetchAccountBalances();
+  cacheBalances(balances);
+}
+
+export function getBalanceCacheAgeMs(): number | null {
+  if (!balanceCache) return null;
+  return Date.now() - balanceCache.fetchedAt;
+}
+
+export function startBalanceReconciler(): () => void {
+  const timer = setInterval(() => {
+    refreshBalanceCache()
+      .then(() => {
+        log('PORTFOLIO', 'Balance cache reconciled from Binance REST');
+      })
+      .catch((error) => {
+        logError('PORTFOLIO', 'Balance reconciler refresh failed', error);
+      });
+  }, BALANCE_RECONCILIATION_INTERVAL_MS);
+
+  return () => {
+    clearInterval(timer);
+  };
+}
+
+async function getBalancesWithCache(): Promise<{
+  balances: AccountBalance[];
+  isStale: boolean;
+}> {
+  const freshCache = getCachedBalances(BALANCE_CACHE_TTL_MS);
+  if (freshCache) {
+    return {
+      balances: freshCache,
+      isStale: false,
+    };
+  }
+
+  try {
+    const balances = await fetchAccountBalances();
+    cacheBalances(balances);
+    return {
+      balances,
+      isStale: false,
+    };
+  } catch (error) {
+    if (error instanceof BinanceRateLimitError) {
+      const staleCache = getCachedBalances(STALE_BALANCE_MAX_AGE_MS);
+      if (staleCache) {
+        const ageMs = getBalanceCacheAgeMs() ?? -1;
+        log(
+          'PORTFOLIO',
+          `Using cached balances due to Binance rate-limit (cache age ${ageMs}ms)`,
+        );
+        return {
+          balances: staleCache,
+          isStale: true,
+        };
+      }
+    }
+    throw error;
+  }
+}
+
 export async function buildPortfolioState(
   knownPrices?: Record<string, number>,
 ): Promise<PortfolioState> {
   log('PORTFOLIO', 'Fetching account balances from Binance...');
-  const balances = await fetchAccountBalances();
+  const { balances, isStale } = await getBalancesWithCache();
   const usdtBalance = balances.find((b) => b.asset === 'USDT');
   const availableUsdt = usdtBalance?.free ?? 0;
 
@@ -136,13 +229,15 @@ export async function buildPortfolioState(
     log('PORTFOLIO', `Position: ${symbol} qty=${totalQty.toFixed(6)} @ $${currentPrice.toFixed(2)} = $${positionValue.toFixed(2)}`);
   }
 
-  log('PORTFOLIO', `Portfolio built: $${availableUsdt.toFixed(2)} USDT + ${positions.length} positions = $${totalValue.toFixed(2)} total`);
+  const staleSuffix = isStale ? ' [stale-balances]' : '';
+  log('PORTFOLIO', `Portfolio built: $${availableUsdt.toFixed(2)} USDT + ${positions.length} positions = $${totalValue.toFixed(2)} total${staleSuffix}`);
 
   return {
     availableUsdt,
     totalValue,
     positions,
     lastUpdated: Date.now(),
+    isBalanceDataStale: isStale,
   };
 }
 

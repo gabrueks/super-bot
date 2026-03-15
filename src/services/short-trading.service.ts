@@ -37,6 +37,21 @@ function getStepSize(symbol: string): number {
   return shortBotConfig.stepSizes[symbol] ?? 0.001;
 }
 
+function computeOpenShortQuantity(
+  symbol: string,
+  notionalUsdt: number,
+  currentPrices: Record<string, number>,
+): { quantity: number; price: number; stepSize: number } {
+  const price = currentPrices[symbol];
+  if (!(price > 0)) {
+    throw new ExecutionBlockedError(`Cannot open short for ${symbol}: invalid current price`);
+  }
+  const stepSize = getStepSize(symbol);
+  const rawQty = notionalUsdt / price;
+  const quantity = floorToStep(rawQty, stepSize);
+  return { quantity, price, stepSize };
+}
+
 export async function executeShortDecisions(
   decisions: ShortTradeDecision[],
   portfolio: ShortPortfolioState,
@@ -62,6 +77,23 @@ export async function executeShortDecisions(
     if (!riskCheck.approved) {
       result.errors.push(`REJECTED ${decision.action} ${decision.symbol}: ${riskCheck.reason}`);
       continue;
+    }
+
+    if (decision.action === 'OPEN_SHORT') {
+      const baseNotional = portfolio.availableUsdt * (decision.percentageOfAvailable / 100);
+      const notionalUsdt = riskCheck.adjustedNotionalUsdt ?? baseNotional;
+      const { quantity, price, stepSize } = computeOpenShortQuantity(
+        decision.symbol,
+        notionalUsdt,
+        currentPrices,
+      );
+      if (!(quantity > 0)) {
+        const minNotionalForStep = stepSize * price;
+        result.errors.push(
+          `REJECTED OPEN_SHORT ${decision.symbol}: notional $${notionalUsdt.toFixed(2)} below minimum ~$${minNotionalForStep.toFixed(2)} required for step size ${stepSize}`,
+        );
+        continue;
+      }
     }
 
     result.decisionsApproved++;
@@ -93,14 +125,9 @@ async function executeSingleShortTrade(
 ): Promise<ShortTradeRecord> {
   const stepSize = getStepSize(decision.symbol);
   if (decision.action === 'OPEN_SHORT') {
-    const price = currentPrices[decision.symbol];
-    if (!(price > 0)) {
-      throw new ExecutionBlockedError(`Cannot open short for ${decision.symbol}: invalid current price`);
-    }
     const baseNotional = portfolio.availableUsdt * (decision.percentageOfAvailable / 100);
     const notionalUsdt = riskCheck.adjustedNotionalUsdt ?? baseNotional;
-    const rawQty = notionalUsdt / price;
-    const quantity = floorToStep(rawQty, stepSize);
+    const { quantity } = computeOpenShortQuantity(decision.symbol, notionalUsdt, currentPrices);
     if (!(quantity > 0)) {
       throw new ExecutionBlockedError(`Calculated quantity is zero for ${decision.symbol}`);
     }

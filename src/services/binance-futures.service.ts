@@ -665,6 +665,7 @@ export async function openShortPosition(symbol: string, quantity: number): Promi
         side: 'SELL',
         type: 'MARKET',
         quantity: formattedQuantity,
+        newOrderRespType: 'RESULT',
       }),
     3,
   );
@@ -706,6 +707,7 @@ export async function openShortPositionWithFallback(
         timeInForce: 'IOC',
         quantity: formattedQuantity,
         price: formattedPrice,
+        newOrderRespType: 'RESULT',
       }),
     2,
   );
@@ -774,6 +776,7 @@ export async function closeShortPosition(symbol: string, quantity: number): Prom
         type: 'MARKET',
         quantity: formattedQuantity,
         reduceOnly: 'true',
+        newOrderRespType: 'RESULT',
       }),
     3,
   );

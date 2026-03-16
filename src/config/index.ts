@@ -62,7 +62,7 @@ export const shortBotConfig: ShortBotConfig = {
   riskParams: shortRiskParams,
   claudeModel: 'claude-sonnet-4-20250514',
   stepSizes: {
-    BTCUSDT: 0.0001,
+    BTCUSDT: 0.001,
     ETHUSDT: 0.001,
     SOLUSDT: 0.1,
   },

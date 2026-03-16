@@ -66,6 +66,49 @@ export interface FuturesOrderResult {
 let futuresCircuitOpenUntil = 0;
 const leverageConfiguredSymbols = new Set<string>();
 
+function getStepPrecision(stepSize: number): number {
+  const stepAsText = stepSize.toString();
+  const decimals = stepAsText.split('.')[1];
+  if (!decimals) {
+    return 0;
+  }
+  return decimals.length;
+}
+
+function trimDecimalZeros(value: string): string {
+  if (!value.includes('.')) {
+    return value;
+  }
+  return value
+    .replace(/(\.\d*?[1-9])0+$/, '$1')
+    .replace(/\.0+$/, '');
+}
+
+function floorToStep(value: number, stepSize: number): number {
+  if (!(stepSize > 0)) {
+    return value;
+  }
+  return Math.floor(value / stepSize) * stepSize;
+}
+
+function formatFuturesQuantity(symbol: string, quantity: number): string {
+  if (!(quantity > 0) || !Number.isFinite(quantity)) {
+    throw new ExecutionBlockedError(`Invalid order quantity for ${symbol}`);
+  }
+
+  const configuredStepSize = shortBotConfig.stepSizes[symbol];
+  if (configuredStepSize && configuredStepSize > 0) {
+    const normalized = floorToStep(quantity, configuredStepSize);
+    if (!(normalized > 0)) {
+      throw new ExecutionBlockedError(`Calculated quantity is below step size for ${symbol}`);
+    }
+    const precision = getStepPrecision(configuredStepSize);
+    return trimDecimalZeros(normalized.toFixed(precision));
+  }
+
+  return trimDecimalZeros(quantity.toFixed(8));
+}
+
 function parseFiniteNumber(value: string, field: string): number {
   const parsed = Number.parseFloat(value);
   if (!Number.isFinite(parsed)) {
@@ -388,6 +431,7 @@ export async function openShortPosition(symbol: string, quantity: number): Promi
   if (!(quantity > 0)) {
     throw new MarginUnavailableError(`Open short quantity must be > 0 for ${symbol}`);
   }
+  const formattedQuantity = formatFuturesQuantity(symbol, quantity);
   await ensureSymbolLeverage(symbol);
   type OrderResponse = {
     symbol: string;
@@ -405,7 +449,7 @@ export async function openShortPosition(symbol: string, quantity: number): Promi
         symbol,
         side: 'SELL',
         type: 'MARKET',
-        quantity: quantity.toFixed(6),
+        quantity: formattedQuantity,
       }),
     3,
   );
@@ -417,6 +461,7 @@ export async function closeShortPosition(symbol: string, quantity: number): Prom
   if (!(quantity > 0)) {
     throw new PositionNotFoundError(`Close short quantity must be > 0 for ${symbol}`);
   }
+  const formattedQuantity = formatFuturesQuantity(symbol, quantity);
   type OrderResponse = {
     symbol: string;
     side: 'BUY' | 'SELL';
@@ -433,7 +478,7 @@ export async function closeShortPosition(symbol: string, quantity: number): Prom
         symbol,
         side: 'BUY',
         type: 'MARKET',
-        quantity: quantity.toFixed(6),
+        quantity: formattedQuantity,
         reduceOnly: 'true',
       }),
     3,

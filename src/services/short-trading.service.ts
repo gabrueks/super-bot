@@ -9,6 +9,7 @@ import {
 import { validateShortDecision } from './short-risk.service';
 import {
   closeShortPosition,
+  fetchFuturesAccountState,
   isBinanceFuturesCircuitOpen,
   openShortPosition,
 } from './binance-futures.service';
@@ -149,8 +150,14 @@ async function executeSingleShortTrade(
   if (!position) {
     throw new PositionNotFoundError(`No short position to close for ${decision.symbol}`);
   }
+  const liveAccountState = await fetchFuturesAccountState();
+  const livePosition = liveAccountState.positions.find((candidate) => candidate.symbol === decision.symbol);
+  if (!livePosition || !(livePosition.quantity > 0)) {
+    throw new PositionNotFoundError(`No live short position to close for ${decision.symbol}`);
+  }
   const boundedPercent = Math.min(100, Math.max(0, decision.percentageOfAvailable));
-  const quantity = floorToStep(position.quantity * (boundedPercent / 100), stepSize);
+  const closeableQuantity = Math.min(position.quantity, livePosition.quantity);
+  const quantity = floorToStep(closeableQuantity * (boundedPercent / 100), stepSize);
   if (!(quantity > 0)) {
     throw new ExecutionBlockedError(`Calculated close quantity is zero for ${decision.symbol}`);
   }

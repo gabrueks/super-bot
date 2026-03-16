@@ -50,6 +50,17 @@ export const shortRiskParams: ShortRiskParams = {
   cooldownMinutes: 15,
   maxDailyLossPercent: 0.05,
   defaultLeverage: 2,
+  riskPerTradePercent: 0.005,
+  atrStopMultiplier: 1.5,
+  minStopDistancePercent: 0.003,
+  maxStopDistancePercent: 0.03,
+  maxSpreadPercent: 0.0015,
+  minBidAskRatio: 0.5,
+  expectedMoveAtrMultiple: 1,
+  estimatedFundingCostPercent: 0.0004,
+  minEdgeBufferPercent: 0.0005,
+  openLimitOffsetBps: 2,
+  openLimitFallbackMinFillPercent: 0.85,
 };
 
 export const shortBotConfig: ShortBotConfig = {

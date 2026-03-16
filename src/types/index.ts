@@ -182,6 +182,36 @@ export interface QualitySummary {
   lastFailureCode?: CycleFailureCode;
 }
 
+export interface ShortQualityCycleMetric {
+  timestamp: number;
+  cycleDurationMs: number;
+  decisionsReceived: number;
+  decisionsApproved: number;
+  tradesExecuted: number;
+  rejectionCount: number;
+  errorCount: number;
+  invalidDecisionRate: number;
+  executionSuccessRate: number;
+  approvalRate: number;
+  estimatedFeesUsdt: number;
+  estimatedFundingUsdt: number;
+  estimatedGrossPnlUsdt: number;
+  estimatedNetPnlUsdt: number;
+  failureCode?: CycleFailureCode;
+}
+
+export interface ShortQualitySummary {
+  recentCycles: number;
+  invalidDecisionRate: number;
+  executionErrorRate: number;
+  approvalRate: number;
+  avgEstimatedFeesUsdt: number;
+  avgEstimatedFundingUsdt: number;
+  avgEstimatedGrossPnlUsdt: number;
+  avgEstimatedNetPnlUsdt: number;
+  lastFailureCode?: CycleFailureCode;
+}
+
 export type ShortTradeAction = 'OPEN_SHORT' | 'CLOSE_SHORT' | 'HOLD';
 
 export interface ShortPosition {
@@ -208,6 +238,10 @@ export interface ShortTradeRecord {
   quantity: number;
   price: number;
   total: number;
+  estimatedFeesUsdt?: number;
+  estimatedFundingUsdt?: number;
+  estimatedGrossPnlUsdt?: number;
+  estimatedNetPnlUsdt?: number;
   timestamp: number;
   reasoning: string;
 }
@@ -230,6 +264,34 @@ export interface ShortRiskCheckResult {
   adjustedNotionalUsdt?: number;
 }
 
+export interface ShortSymbolRiskInput {
+  symbol: string;
+  currentPrice: number;
+  atr: number;
+  stopDistanceUsdt: number;
+  stopDistancePercent: number;
+}
+
+export interface ShortExecutionInput {
+  symbol: string;
+  midPrice: number;
+  topBidPrice: number;
+  topAskPrice: number;
+  spreadPercent: number;
+  bidAskRatio: number;
+  atrPercent: number;
+}
+
+export type ShortMarketRegimeKind = 'BULL_TREND' | 'BEAR_TREND' | 'CHOPPY' | 'PANIC' | 'EUPHORIA';
+
+export interface ShortMarketRegime {
+  kind: ShortMarketRegimeKind;
+  strength: number;
+  breadth: number;
+  averageRsi1h: number;
+  sentimentValue: number;
+}
+
 export interface ShortCycleResult {
   timestamp: number;
   decisionsReceived: number;
@@ -247,6 +309,17 @@ export interface ShortRiskParams {
   cooldownMinutes: number;
   maxDailyLossPercent: number;
   defaultLeverage: number;
+  riskPerTradePercent: number;
+  atrStopMultiplier: number;
+  minStopDistancePercent: number;
+  maxStopDistancePercent: number;
+  maxSpreadPercent: number;
+  minBidAskRatio: number;
+  expectedMoveAtrMultiple: number;
+  estimatedFundingCostPercent: number;
+  minEdgeBufferPercent: number;
+  openLimitOffsetBps: number;
+  openLimitFallbackMinFillPercent: number;
 }
 
 export interface ShortBotConfig {

@@ -11,6 +11,8 @@ import {
 const RATE_LIMIT_STATUS_CODES = new Set([418, 429]);
 const MAX_RETRY_DELAY_MS = 5_000;
 const DEFAULT_RETRY_BASE_MS = 400;
+const DEFAULT_RECV_WINDOW_MS = 10_000;
+const SERVER_TIME_SYNC_TTL_MS = 60_000;
 
 type BinanceFuturesErrorLike = {
   message?: string;
@@ -39,6 +41,13 @@ export class BinanceFuturesRateLimitError extends Error {
   }
 }
 
+export class BinanceFuturesTimestampError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'BinanceFuturesTimestampError';
+  }
+}
+
 export interface FuturesPosition {
   symbol: string;
   quantity: number;
@@ -63,8 +72,29 @@ export interface FuturesOrderResult {
   status: string;
 }
 
+export interface FuturesFundingFee {
+  symbol: string;
+  income: number;
+  timestamp: number;
+}
+
 let futuresCircuitOpenUntil = 0;
 const leverageConfiguredSymbols = new Set<string>();
+const EXCHANGE_FILTER_CACHE_TTL_MS = 60 * 60 * 1000;
+let futuresServerTimeOffsetMs = 0;
+let futuresServerTimeSyncedAtMs = 0;
+
+type FuturesSymbolFilters = {
+  stepSize?: number;
+  minQty?: number;
+  minNotional?: number;
+  tickSize?: number;
+};
+
+let exchangeFilterCache: {
+  fetchedAt: number;
+  bySymbol: Record<string, FuturesSymbolFilters>;
+} | null = null;
 
 function getStepPrecision(stepSize: number): number {
   const stepAsText = stepSize.toString();
@@ -91,22 +121,128 @@ function floorToStep(value: number, stepSize: number): number {
   return Math.floor(value / stepSize) * stepSize;
 }
 
-function formatFuturesQuantity(symbol: string, quantity: number): string {
+function formatFuturesQuantity(
+  symbol: string,
+  quantity: number,
+  filters?: FuturesSymbolFilters,
+): string {
   if (!(quantity > 0) || !Number.isFinite(quantity)) {
     throw new ExecutionBlockedError(`Invalid order quantity for ${symbol}`);
   }
 
-  const configuredStepSize = shortBotConfig.stepSizes[symbol];
-  if (configuredStepSize && configuredStepSize > 0) {
-    const normalized = floorToStep(quantity, configuredStepSize);
+  const stepSize = filters?.stepSize ?? shortBotConfig.stepSizes[symbol];
+  if (stepSize && stepSize > 0) {
+    const normalized = floorToStep(quantity, stepSize);
     if (!(normalized > 0)) {
       throw new ExecutionBlockedError(`Calculated quantity is below step size for ${symbol}`);
     }
-    const precision = getStepPrecision(configuredStepSize);
+    if (filters?.minQty && normalized < filters.minQty) {
+      throw new ExecutionBlockedError(
+        `Order quantity ${normalized} is below min quantity ${filters.minQty} for ${symbol}`,
+      );
+    }
+    const precision = getStepPrecision(stepSize);
     return trimDecimalZeros(normalized.toFixed(precision));
   }
 
   return trimDecimalZeros(quantity.toFixed(8));
+}
+
+function formatFuturesPrice(
+  symbol: string,
+  price: number,
+  filters?: FuturesSymbolFilters,
+): string {
+  if (!(price > 0) || !Number.isFinite(price)) {
+    throw new ExecutionBlockedError(`Invalid order price for ${symbol}`);
+  }
+  const tickSize = filters?.tickSize;
+  if (tickSize && tickSize > 0) {
+    const normalized = floorToStep(price, tickSize);
+    if (!(normalized > 0)) {
+      throw new ExecutionBlockedError(`Calculated price is below tick size for ${symbol}`);
+    }
+    const precision = getStepPrecision(tickSize);
+    return trimDecimalZeros(normalized.toFixed(precision));
+  }
+  return trimDecimalZeros(price.toFixed(8));
+}
+
+function parseFilterValue(value: string | undefined): number | undefined {
+  if (!value) return undefined;
+  const parsed = Number.parseFloat(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) return undefined;
+  return parsed;
+}
+
+async function refreshExchangeFilterCache(): Promise<void> {
+  type ExchangeInfoResponse = {
+    symbols: Array<{
+      symbol: string;
+      filters: Array<{
+        filterType: string;
+        stepSize?: string;
+        minQty?: string;
+        minNotional?: string;
+        notional?: string;
+        tickSize?: string;
+      }>;
+    }>;
+  };
+
+  const exchangeInfo = await executeWithRetries(
+    'exchangeInfo',
+    () => futuresRequest<ExchangeInfoResponse>('GET', '/fapi/v1/exchangeInfo'),
+    2,
+  );
+
+  const bySymbol: Record<string, FuturesSymbolFilters> = {};
+  for (const symbolInfo of exchangeInfo.symbols) {
+    let stepSize: number | undefined;
+    let minQty: number | undefined;
+    let minNotional: number | undefined;
+    let tickSize: number | undefined;
+
+    for (const filter of symbolInfo.filters) {
+      if (filter.filterType === 'LOT_SIZE' || filter.filterType === 'MARKET_LOT_SIZE') {
+        stepSize = stepSize ?? parseFilterValue(filter.stepSize);
+        minQty = minQty ?? parseFilterValue(filter.minQty);
+      }
+      if (filter.filterType === 'MIN_NOTIONAL' || filter.filterType === 'NOTIONAL') {
+        minNotional = minNotional ?? parseFilterValue(filter.minNotional ?? filter.notional);
+      }
+      if (filter.filterType === 'PRICE_FILTER') {
+        tickSize = tickSize ?? parseFilterValue(filter.tickSize);
+      }
+    }
+
+    bySymbol[symbolInfo.symbol] = { stepSize, minQty, minNotional, tickSize };
+  }
+
+  exchangeFilterCache = {
+    fetchedAt: Date.now(),
+    bySymbol,
+  };
+}
+
+async function getFuturesSymbolFilters(symbol: string): Promise<FuturesSymbolFilters | undefined> {
+  const isCacheMissing = exchangeFilterCache === null;
+  const isCacheExpired = exchangeFilterCache !== null
+    ? Date.now() - exchangeFilterCache.fetchedAt > EXCHANGE_FILTER_CACHE_TTL_MS
+    : false;
+
+  if (isCacheMissing || isCacheExpired) {
+    try {
+      await refreshExchangeFilterCache();
+    } catch (error) {
+      log(
+        'BINANCE-FUTURES',
+        `Exchange filters refresh failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  return exchangeFilterCache?.bySymbol[symbol];
 }
 
 function parseFiniteNumber(value: string, field: string): number {
@@ -205,6 +341,35 @@ function parseOrderResult(
   };
 }
 
+function parseOrderResultAllowEmpty(
+  order: {
+    symbol: string;
+    side: 'BUY' | 'SELL';
+    status: string;
+    executedQty: string;
+    avgPrice: string;
+    cumQuote: string;
+  },
+): FuturesOrderResult {
+  const executedQty = Number.parseFloat(order.executedQty);
+  const cummulativeQuoteQty = Number.parseFloat(order.cumQuote);
+  const parsedAvgPrice = Number.parseFloat(order.avgPrice);
+  const avgPrice = Number.isFinite(parsedAvgPrice) && parsedAvgPrice > 0
+    ? parsedAvgPrice
+    : (Number.isFinite(cummulativeQuoteQty) && Number.isFinite(executedQty) && executedQty > 0
+      ? cummulativeQuoteQty / executedQty
+      : 0);
+
+  return {
+    symbol: order.symbol,
+    side: order.side,
+    executedQty: Number.isFinite(executedQty) && executedQty > 0 ? executedQty : 0,
+    avgPrice: Number.isFinite(avgPrice) ? avgPrice : 0,
+    cummulativeQuoteQty: Number.isFinite(cummulativeQuoteQty) && cummulativeQuoteQty > 0 ? cummulativeQuoteQty : 0,
+    status: order.status,
+  };
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
@@ -283,6 +448,43 @@ function toRateLimitError(error: unknown): BinanceFuturesRateLimitError {
   return new BinanceFuturesRateLimitError(message, retryAfterMs, banUntilMs);
 }
 
+function isTimestampWindowError(error: unknown): boolean {
+  const message = getErrorMessage(error).toLowerCase();
+  return message.includes('outside of the recvwindow')
+    || message.includes('timestamp for this request')
+    || message.includes('"code":-1021')
+    || message.includes('code=-1021');
+}
+
+function shouldSyncServerTime(): boolean {
+  return Date.now() - futuresServerTimeSyncedAtMs > SERVER_TIME_SYNC_TTL_MS;
+}
+
+async function syncFuturesServerTime(force = false): Promise<void> {
+  if (!force && !shouldSyncServerTime()) {
+    return;
+  }
+  try {
+    const url = `${envConfig.binanceFuturesBaseUrl}/fapi/v1/time`;
+    const response = await fetch(url, { method: 'GET' });
+    if (!response.ok) {
+      return;
+    }
+    const data = await response.json() as { serverTime?: number };
+    if (typeof data.serverTime !== 'number' || !Number.isFinite(data.serverTime)) {
+      return;
+    }
+    futuresServerTimeOffsetMs = data.serverTime - Date.now();
+    futuresServerTimeSyncedAtMs = Date.now();
+  } catch {
+    return;
+  }
+}
+
+function getSyncedTimestampMs(): number {
+  return Date.now() + futuresServerTimeOffsetMs;
+}
+
 async function executeWithRetries<T>(
   operation: string,
   task: () => Promise<T>,
@@ -302,6 +504,17 @@ async function executeWithRetries<T>(
     try {
       return await task();
     } catch (error) {
+      if (isTimestampWindowError(error)) {
+        if (attempt === maxAttempts) {
+          throw new BinanceFuturesTimestampError(
+            `Binance Futures ${operation} timestamp drift: ${getErrorMessage(error)}`,
+          );
+        }
+        await syncFuturesServerTime(true);
+        await sleep(100);
+        continue;
+      }
+
       if (!isRateLimitError(error)) {
         throw error;
       }
@@ -348,10 +561,11 @@ async function futuresRequest<T>(
   path: string,
   params: Record<string, string> = {},
 ): Promise<T> {
+  await syncFuturesServerTime();
   const query = new URLSearchParams({
     ...params,
-    recvWindow: '5000',
-    timestamp: Date.now().toString(),
+    recvWindow: DEFAULT_RECV_WINDOW_MS.toString(),
+    timestamp: getSyncedTimestampMs().toString(),
   });
   query.set('signature', signQuery(query));
 
@@ -431,7 +645,8 @@ export async function openShortPosition(symbol: string, quantity: number): Promi
   if (!(quantity > 0)) {
     throw new MarginUnavailableError(`Open short quantity must be > 0 for ${symbol}`);
   }
-  const formattedQuantity = formatFuturesQuantity(symbol, quantity);
+  const symbolFilters = await getFuturesSymbolFilters(symbol);
+  const formattedQuantity = formatFuturesQuantity(symbol, quantity, symbolFilters);
   await ensureSymbolLeverage(symbol);
   type OrderResponse = {
     symbol: string;
@@ -457,11 +672,90 @@ export async function openShortPosition(symbol: string, quantity: number): Promi
   return parseOrderResult('openShort', symbol, order);
 }
 
+export async function openShortPositionWithFallback(
+  symbol: string,
+  quantity: number,
+  limitPrice: number,
+  minFillRatio: number,
+): Promise<FuturesOrderResult> {
+  if (!(quantity > 0)) {
+    throw new MarginUnavailableError(`Open short quantity must be > 0 for ${symbol}`);
+  }
+
+  const symbolFilters = await getFuturesSymbolFilters(symbol);
+  const formattedQuantity = formatFuturesQuantity(symbol, quantity, symbolFilters);
+  const formattedPrice = formatFuturesPrice(symbol, limitPrice, symbolFilters);
+  await ensureSymbolLeverage(symbol);
+
+  type OrderResponse = {
+    symbol: string;
+    side: 'BUY' | 'SELL';
+    status: string;
+    executedQty: string;
+    avgPrice: string;
+    cumQuote: string;
+  };
+
+  const limitOrder = await executeWithRetries(
+    `openShortLimitIoc:${symbol}`,
+    () =>
+      futuresRequest<OrderResponse>('POST', '/fapi/v1/order', {
+        symbol,
+        side: 'SELL',
+        type: 'LIMIT',
+        timeInForce: 'IOC',
+        quantity: formattedQuantity,
+        price: formattedPrice,
+      }),
+    2,
+  );
+  const parsedLimit = parseOrderResultAllowEmpty(limitOrder);
+  if (parsedLimit.executedQty > 0) {
+    const fillRatio = parsedLimit.executedQty / quantity;
+    if (fillRatio >= Math.max(0, Math.min(1, minFillRatio))) {
+      return parseOrderResult('openShort', symbol, {
+        symbol: parsedLimit.symbol,
+        side: parsedLimit.side,
+        status: parsedLimit.status,
+        executedQty: parsedLimit.executedQty.toString(),
+        avgPrice: parsedLimit.avgPrice.toString(),
+        cumQuote: parsedLimit.cummulativeQuoteQty.toString(),
+      });
+    }
+  }
+
+  const remainingQty = Math.max(0, quantity - parsedLimit.executedQty);
+  if (!(remainingQty > 0)) {
+    return parseOrderResult('openShort', symbol, {
+      symbol: parsedLimit.symbol,
+      side: parsedLimit.side,
+      status: parsedLimit.status,
+      executedQty: parsedLimit.executedQty.toString(),
+      avgPrice: parsedLimit.avgPrice.toString(),
+      cumQuote: parsedLimit.cummulativeQuoteQty.toString(),
+    });
+  }
+
+  const marketRemainder = await openShortPosition(symbol, remainingQty);
+  const totalQty = parsedLimit.executedQty + marketRemainder.executedQty;
+  const totalQuote = parsedLimit.cummulativeQuoteQty + marketRemainder.cummulativeQuoteQty;
+  const avgPrice = totalQty > 0 ? totalQuote / totalQty : 0;
+  return parseOrderResult('openShort', symbol, {
+    symbol,
+    side: marketRemainder.side,
+    status: marketRemainder.status,
+    executedQty: totalQty.toString(),
+    avgPrice: avgPrice.toString(),
+    cumQuote: totalQuote.toString(),
+  });
+}
+
 export async function closeShortPosition(symbol: string, quantity: number): Promise<FuturesOrderResult> {
   if (!(quantity > 0)) {
     throw new PositionNotFoundError(`Close short quantity must be > 0 for ${symbol}`);
   }
-  const formattedQuantity = formatFuturesQuantity(symbol, quantity);
+  const symbolFilters = await getFuturesSymbolFilters(symbol);
+  const formattedQuantity = formatFuturesQuantity(symbol, quantity, symbolFilters);
   type OrderResponse = {
     symbol: string;
     side: 'BUY' | 'SELL';
@@ -485,4 +779,43 @@ export async function closeShortPosition(symbol: string, quantity: number): Prom
   );
 
   return parseOrderResult('closeShort', symbol, order);
+}
+
+export async function fetchFuturesFundingFees(
+  symbol: string,
+  startTimeMs: number,
+): Promise<FuturesFundingFee[]> {
+  type IncomeResponseItem = {
+    symbol: string;
+    income: string;
+    incomeType: string;
+    time: number;
+  };
+
+  const fromTime = Number.isFinite(startTimeMs) && startTimeMs > 0
+    ? Math.floor(startTimeMs)
+    : Date.now() - 72 * 60 * 60 * 1000;
+
+  const incomeRows = await executeWithRetries(
+    `fundingFees:${symbol}`,
+    () =>
+      futuresRequest<IncomeResponseItem[]>('GET', '/fapi/v1/income', {
+        symbol,
+        incomeType: 'FUNDING_FEE',
+        startTime: fromTime.toString(),
+        limit: '100',
+      }),
+    2,
+  );
+
+  return incomeRows
+    .map((row) => {
+      const income = Number.parseFloat(row.income);
+      return {
+        symbol: row.symbol,
+        income,
+        timestamp: row.time,
+      };
+    })
+    .filter((row) => Number.isFinite(row.income));
 }

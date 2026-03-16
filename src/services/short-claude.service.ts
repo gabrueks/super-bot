@@ -5,6 +5,7 @@ import {
   MarketData,
   SentimentData,
   ShortClaudeResponse,
+  ShortMarketRegime,
   ShortPortfolioState,
   ShortTradeRecord,
 } from '../types';
@@ -51,6 +52,9 @@ Rules:
 - Include a decision for EVERY configured symbol
 - OPEN_SHORT uses % of available USDT margin
 - CLOSE_SHORT uses % of current short position size
+- OPEN_SHORT execution is risk-adjusted by ATR stop distance and may be reduced below requested %
+- OPEN_SHORT can be rejected by spread/liquidity/edge execution gates
+- If regime is BULL_TREND with high strength, prefer HOLD or CLOSE_SHORT over OPEN_SHORT
 - HOLD must have percentageOfAvailable = 0
 - Output JSON only`;
 
@@ -159,6 +163,7 @@ export async function getShortTradeDecisions(
   portfolio: ShortPortfolioState,
   recentTrades: ShortTradeRecord[],
   sentiment: SentimentData,
+  regime: ShortMarketRegime,
 ): Promise<ShortClaudeResponse> {
   const userPrompt = [
     '[MARKET]',
@@ -169,6 +174,10 @@ export async function getShortTradeDecisions(
     '',
     '[SENTIMENT]',
     `Fear & Greed Index: ${sentiment.value}/100 (${sentiment.label})`,
+    '',
+    '[REGIME]',
+    `Kind: ${regime.kind}`,
+    `Strength: ${regime.strength.toFixed(2)} | Breadth: ${regime.breadth.toFixed(2)} | Avg RSI 1h: ${regime.averageRsi1h.toFixed(1)}`,
     '',
     '[RECENT_SHORT_TRADES]',
     formatRecentShortTrades(recentTrades.slice(-6)),

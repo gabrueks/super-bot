@@ -1,10 +1,18 @@
 import { shortBotConfig } from '../config';
-import { ShortPortfolioState, ShortRiskCheckResult, ShortTradeDecision } from '../types';
+import {
+  ShortMarketRegime,
+  ShortPortfolioState,
+  ShortRiskCheckResult,
+  ShortSymbolRiskInput,
+  ShortTradeDecision,
+} from '../types';
 import { getRecentShortTrades, getShortDailyStartValue } from './short-portfolio.service';
 
 export function validateShortDecision(
   decision: ShortTradeDecision,
   portfolio: ShortPortfolioState,
+  riskInputs: Record<string, ShortSymbolRiskInput>,
+  regime: ShortMarketRegime,
 ): ShortRiskCheckResult {
   if (decision.action === 'HOLD') {
     return { approved: true };
@@ -25,7 +33,7 @@ export function validateShortDecision(
   }
 
   if (decision.action === 'OPEN_SHORT') {
-    return validateOpenShort(decision, portfolio);
+    return validateOpenShort(decision, portfolio, riskInputs, regime);
   }
 
   return validateCloseShort(decision, portfolio);
@@ -34,13 +42,33 @@ export function validateShortDecision(
 function validateOpenShort(
   decision: ShortTradeDecision,
   portfolio: ShortPortfolioState,
+  riskInputs: Record<string, ShortSymbolRiskInput>,
+  regime: ShortMarketRegime,
 ): ShortRiskCheckResult {
-  const requestedNotionalUsdt =
-    portfolio.availableUsdt * (decision.percentageOfAvailable / 100);
-  if (requestedNotionalUsdt < shortBotConfig.riskParams.minTradeUsdt) {
+  const requestedNotionalUsdt = portfolio.availableUsdt * (decision.percentageOfAvailable / 100);
+  const riskInput = riskInputs[decision.symbol];
+  if (!riskInput || !(riskInput.stopDistancePercent > 0)) {
     return {
       approved: false,
-      reason: `Trade too small: $${requestedNotionalUsdt.toFixed(2)} < min $${shortBotConfig.riskParams.minTradeUsdt}`,
+      reason: `Missing risk input for ${decision.symbol}`,
+    };
+  }
+
+  const maxLossUsdt = portfolio.totalValue * shortBotConfig.riskParams.riskPerTradePercent;
+  const riskBasedNotionalUsdt = maxLossUsdt / riskInput.stopDistancePercent;
+  const regimeMultiplier = getOpenShortRegimeMultiplier(regime);
+  if (!(regimeMultiplier > 0)) {
+    return {
+      approved: false,
+      reason: `OPEN_SHORT blocked by regime ${regime.kind} (strength ${regime.strength.toFixed(2)})`,
+    };
+  }
+
+  const candidateNotionalUsdt = Math.min(requestedNotionalUsdt, riskBasedNotionalUsdt * regimeMultiplier);
+  if (candidateNotionalUsdt < shortBotConfig.riskParams.minTradeUsdt) {
+    return {
+      approved: false,
+      reason: `Trade too small after risk sizing: $${candidateNotionalUsdt.toFixed(2)} < min $${shortBotConfig.riskParams.minTradeUsdt}`,
     };
   }
 
@@ -48,7 +76,7 @@ function validateOpenShort(
   const existingNotional = existing && Number.isFinite(existing.notionalValue) && existing.notionalValue > 0
     ? existing.notionalValue
     : 0;
-  const newTotalPositionNotional = existingNotional + requestedNotionalUsdt;
+  const newTotalPositionNotional = existingNotional + candidateNotionalUsdt;
   const maxAllowed = portfolio.totalValue * shortBotConfig.riskParams.maxShortAllocationPerCoin;
   if (newTotalPositionNotional > maxAllowed) {
     const adjusted = Math.max(0, maxAllowed - existingNotional);
@@ -61,7 +89,7 @@ function validateOpenShort(
     return {
       approved: true,
       adjustedNotionalUsdt: adjusted,
-      reason: `Capped from $${requestedNotionalUsdt.toFixed(2)} to $${adjusted.toFixed(2)} (max short allocation)`,
+      reason: `Capped from $${candidateNotionalUsdt.toFixed(2)} to $${adjusted.toFixed(2)} (max short allocation)`,
     };
   }
 
@@ -71,7 +99,7 @@ function validateOpenShort(
     }
     return sum;
   }, 0);
-  const deploymentAfterTrade = deployed + requestedNotionalUsdt;
+  const deploymentAfterTrade = deployed + candidateNotionalUsdt;
   const maxDeployment = portfolio.totalValue * shortBotConfig.riskParams.maxTotalShortExposure;
   if (deploymentAfterTrade > maxDeployment) {
     const adjusted = Math.max(0, maxDeployment - deployed);
@@ -84,11 +112,33 @@ function validateOpenShort(
     return {
       approved: true,
       adjustedNotionalUsdt: adjusted,
-      reason: `Capped from $${requestedNotionalUsdt.toFixed(2)} to $${adjusted.toFixed(2)} (max short exposure)`,
+      reason: `Capped from $${candidateNotionalUsdt.toFixed(2)} to $${adjusted.toFixed(2)} (max short exposure)`,
     };
   }
 
-  return { approved: true };
+  return {
+    approved: true,
+    adjustedNotionalUsdt: candidateNotionalUsdt,
+  };
+}
+
+function getOpenShortRegimeMultiplier(regime: ShortMarketRegime): number {
+  if (regime.kind === 'BULL_TREND') {
+    if (regime.strength >= 0.7) {
+      return 0;
+    }
+    return 0.35;
+  }
+  if (regime.kind === 'CHOPPY') {
+    return 0.6;
+  }
+  if (regime.kind === 'PANIC') {
+    return 0.8;
+  }
+  if (regime.kind === 'EUPHORIA') {
+    return 1;
+  }
+  return 1;
 }
 
 function validateCloseShort(

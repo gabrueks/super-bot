@@ -205,6 +205,10 @@ export async function executeShortDecisions(
       result.trades.push(trade);
       appendShortTrade(trade);
     } catch (error) {
+      if (decision.action === 'CLOSE_SHORT' && error instanceof PositionNotFoundError) {
+        result.errors.push(`REJECTED CLOSE_SHORT ${decision.symbol}: ${error.message}`);
+        continue;
+      }
       logError('SHORT-TRADING', `Failed to execute ${decision.action} ${decision.symbol}`, error);
       result.errors.push(
         `ERROR executing ${decision.action} ${decision.symbol}: ${error instanceof Error ? error.message : String(error)}`,
@@ -273,7 +277,22 @@ async function executeSingleShortTrade(
   if (!(quantity > 0)) {
     throw new ExecutionBlockedError(`Calculated close quantity is zero for ${decision.symbol}`);
   }
-  const order = await closeShortPosition(decision.symbol, quantity);
+  let order;
+  try {
+    order = await closeShortPosition(decision.symbol, quantity);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.includes('closeShort returned zero executed quantity')) {
+      const refreshedAccountState = await fetchFuturesAccountState();
+      const refreshedPosition = refreshedAccountState.positions.find(
+        (candidate) => candidate.symbol === decision.symbol,
+      );
+      if (!refreshedPosition || !(refreshedPosition.quantity > 0)) {
+        throw new PositionNotFoundError(`No live short position remained for ${decision.symbol} at execution time`);
+      }
+    }
+    throw error;
+  }
   const estimatedCloseFeeUsdt = estimateTradingFeeUsdt(order.cummulativeQuoteQty);
   const estimatedOpenNotionalUsdt = livePosition.entryPrice * order.executedQty;
   const estimatedOpenFeeUsdt = estimateTradingFeeUsdt(estimatedOpenNotionalUsdt);

@@ -19,6 +19,7 @@ import { getShortTradeDecisions } from './services/short-claude.service';
 import { executeShortDecisions } from './services/short-trading.service';
 import { fetchFearAndGreed } from './services/sentiment.service';
 import { recordShortCycleQuality } from './services/short-eval.service';
+import { applyShortMeanReversionStrategy } from './services/short-mean-reversion.service';
 import { log, logError } from './logger';
 import { MarketDataUnavailableError, toFailureCode } from './errors/domain-errors';
 
@@ -227,8 +228,20 @@ export async function runShortCycle(): Promise<ShortCycleResult | null> {
       sentiment,
       regime,
     );
-    const cycleResult = await executeShortDecisions(
+    const meanReversionResult = applyShortMeanReversionStrategy(
       response.decisions,
+      marketData,
+      portfolio,
+      regime,
+    );
+    if (meanReversionResult.adjustedSymbols.length > 0) {
+      log(
+        'SHORT-STRATEGY',
+        `Mean-reversion adjusted: ${meanReversionResult.adjustedSymbols.join(', ')}`,
+      );
+    }
+    const cycleResult = await executeShortDecisions(
+      meanReversionResult.decisions,
       portfolio,
       priceMap,
       riskInputs,

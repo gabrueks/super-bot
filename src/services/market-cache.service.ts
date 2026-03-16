@@ -5,6 +5,7 @@ import { log, logError } from '../logger';
 
 const KLINE_BUFFER_SIZE = 60;
 const BACKFILL_REST_SPACING_MS = 150;
+const BACKFILL_ENABLED = process.env.MARKET_CACHE_BACKFILL === 'true';
 
 const klineBuffers = new Map<string, Kline[]>();
 const tickerCache = new Map<string, TickerStats>();
@@ -45,8 +46,11 @@ function startCandleStream(symbol: string, tf: Timeframe): void {
   const key = cacheKey(symbol, tf);
 
   const cleanup = getClient().ws.candles(symbol, tf, (event) => {
-    const buffer = klineBuffers.get(key);
-    if (!buffer) return;
+    let buffer = klineBuffers.get(key);
+    if (!buffer) {
+      buffer = [];
+      klineBuffers.set(key, buffer);
+    }
 
     const candle: Kline = {
       openTime: event.startTime,
@@ -124,11 +128,33 @@ export async function initMarketStreams(pairs: string[] = botConfig.tradingPairs
 
   for (const symbol of pairs) {
     for (const tf of TIMEFRAMES) {
-      await backfillKlines(symbol, tf);
-      await sleep(BACKFILL_REST_SPACING_MS);
+      const key = cacheKey(symbol, tf);
+      if (!klineBuffers.has(key)) {
+        klineBuffers.set(key, []);
+      }
     }
   }
-  log('WS-CACHE', `Backfill complete for ${pairs.length} pairs x ${TIMEFRAMES.length} timeframes`);
+
+  if (BACKFILL_ENABLED) {
+    log('WS-CACHE', 'REST backfill enabled via MARKET_CACHE_BACKFILL=true');
+    for (const symbol of pairs) {
+      for (const tf of TIMEFRAMES) {
+        try {
+          await backfillKlines(symbol, tf);
+          await sleep(BACKFILL_REST_SPACING_MS);
+        } catch (error) {
+          logError(
+            'WS-CACHE',
+            `Backfill failed for ${symbol} ${tf}, continuing with WebSocket-only warmup`,
+            error,
+          );
+        }
+      }
+    }
+    log('WS-CACHE', `Backfill attempt complete for ${pairs.length} pairs x ${TIMEFRAMES.length} timeframes`);
+  } else {
+    log('WS-CACHE', 'REST backfill disabled (WebSocket-only warmup)');
+  }
 
   for (const symbol of pairs) {
     for (const tf of TIMEFRAMES) {

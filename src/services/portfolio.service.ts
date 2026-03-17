@@ -15,7 +15,9 @@ import { log, logError } from '../logger';
 
 const BALANCE_CACHE_TTL_MS = 60_000;
 const STALE_BALANCE_MAX_AGE_MS = 15 * 60 * 1000;
+const STALE_BALANCE_RATE_LIMIT_MAX_AGE_MS = 4 * 60 * 60 * 1000;
 const BALANCE_RECONCILIATION_INTERVAL_MS = 5 * 60 * 1000;
+const BALANCE_CACHE_FILE = `${DATA_DIR}/balance-cache.json`;
 
 interface BalanceCache {
   balances: AccountBalance[];
@@ -95,13 +97,42 @@ export function getDailyStartValue(): number | null {
 }
 
 function cacheBalances(balances: AccountBalance[]): void {
-  balanceCache = {
+  const nextCache: BalanceCache = {
     balances,
     fetchedAt: Date.now(),
   };
+  balanceCache = nextCache;
+  ensureDataDir();
+  fs.writeFileSync(BALANCE_CACHE_FILE, JSON.stringify(nextCache, null, 2));
+}
+
+function loadPersistedBalanceCache(): BalanceCache | null {
+  ensureDataDir();
+  if (!fs.existsSync(BALANCE_CACHE_FILE)) {
+    return null;
+  }
+  try {
+    const raw = fs.readFileSync(BALANCE_CACHE_FILE, 'utf-8');
+    const parsed = JSON.parse(raw) as Partial<BalanceCache>;
+    if (!Array.isArray(parsed.balances) || typeof parsed.fetchedAt !== 'number') {
+      return null;
+    }
+    return {
+      balances: parsed.balances.filter((item) =>
+        typeof item.asset === 'string'
+        && typeof item.free === 'number'
+        && typeof item.locked === 'number'),
+      fetchedAt: parsed.fetchedAt,
+    };
+  } catch {
+    return null;
+  }
 }
 
 function getCachedBalances(maxAgeMs: number): AccountBalance[] | null {
+  if (!balanceCache) {
+    balanceCache = loadPersistedBalanceCache();
+  }
   if (!balanceCache) return null;
   const age = Date.now() - balanceCache.fetchedAt;
   if (age > maxAgeMs) return null;
@@ -155,7 +186,7 @@ async function getBalancesWithCache(): Promise<{
     };
   } catch (error) {
     if (error instanceof BinanceRateLimitError) {
-      const staleCache = getCachedBalances(STALE_BALANCE_MAX_AGE_MS);
+      const staleCache = getCachedBalances(STALE_BALANCE_RATE_LIMIT_MAX_AGE_MS);
       if (staleCache) {
         const ageMs = getBalanceCacheAgeMs() ?? -1;
         log(

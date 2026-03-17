@@ -15,7 +15,6 @@ import {
 import { appendTrade } from './portfolio.service';
 import { registerStop, removeStop } from './stop-loss.service';
 import { log, logError } from '../logger';
-import { ExecutionBlockedError } from '../errors/domain-errors';
 
 const TRADE_EXECUTION_SPACING_MS = 300;
 
@@ -33,10 +32,6 @@ export async function executeDecisions(
   decisions: TradeDecision[],
   portfolio: PortfolioState,
 ): Promise<CycleResult> {
-  if (isBinanceRestCircuitOpen()) {
-    throw new ExecutionBlockedError('Binance REST circuit is open');
-  }
-
   const result: CycleResult = {
     timestamp: Date.now(),
     decisionsReceived: decisions.length,
@@ -48,6 +43,19 @@ export async function executeDecisions(
 
   const actionable = decisions.filter((d) => d.action !== 'HOLD');
   log('TRADING', `Processing ${actionable.length} actionable decisions (${decisions.length - actionable.length} HOLDs skipped)`);
+
+  if (isBinanceRestCircuitOpen()) {
+    if (actionable.length === 0) {
+      log('TRADING', 'Binance REST circuit is open, but no actionable decisions to execute');
+      return result;
+    }
+
+    for (const decision of actionable) {
+      result.errors.push(`REJECTED ${decision.action} ${decision.symbol}: Binance REST circuit is open`);
+    }
+    log('TRADING', `Binance REST circuit is open -- rejected ${actionable.length} actionable decision(s)`);
+    return result;
+  }
 
   for (let i = 0; i < actionable.length; i++) {
     const decision = actionable[i];
